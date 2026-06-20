@@ -48,6 +48,9 @@ WORLD_BANK_API = (
     "https://api.worldbank.org/v2/country/THA/indicator/ST.INT.ARVL"
     "?format=json&per_page=80"
 )
+REQUEST_HEADERS = {
+    "User-Agent": "thailand-tourism-dashboard/1.0 (+https://github.com/benzkanin41-alt/thailand-tourism-dashboard)"
+}
 
 MONTH_MAP = {
     "jan": 1,
@@ -167,7 +170,7 @@ def fetch_text(url: str, refresh: bool = False) -> str:
     path = PAGES / cache_name(url)
     if path.exists() and not refresh:
         return path.read_text(encoding="utf-8", errors="replace")
-    response = requests.get(url, timeout=40)
+    response = requests.get(url, timeout=40, headers=REQUEST_HEADERS)
     response.raise_for_status()
     text = response.text
     path.write_text(text, encoding="utf-8")
@@ -178,11 +181,22 @@ def fetch_json(url: str, refresh: bool = False) -> Any:
     path = PAGES / cache_name(url)
     if path.exists() and not refresh:
         return json.loads(path.read_text(encoding="utf-8"))
-    response = requests.get(url, timeout=40)
+    response = requests.get(url, timeout=40, headers=REQUEST_HEADERS)
     response.raise_for_status()
     data = response.json()
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
+
+
+def fetch_json_optional(url: str, fallback: dict[str, Any], refresh: bool = False) -> dict[str, Any]:
+    try:
+        return fetch_json(url, refresh=refresh)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        return {
+            **fallback,
+            "fetch_warning": f"{url} returned HTTP {status}; using embedded package metadata fallback",
+        }
 
 
 def normalize_html(text: str) -> str:
@@ -619,8 +633,38 @@ def crawl_mots(refresh: bool = False) -> tuple[list[NewsFile], dict[str, Any]]:
     consolidated_html = fetch_text(consolidated_url, refresh=refresh)
     source_files.extend(parse_news_files(consolidated_html, 585, 2019, consolidated_url))
 
-    data_go = fetch_json(DATA_GO_PACKAGE_API, refresh=refresh)
-    trend_inbound = fetch_json(TREND_INBOUND_PACKAGE_API, refresh=refresh)
+    data_go = fetch_json_optional(
+        DATA_GO_PACKAGE_API,
+        {
+            "success": False,
+            "result": {
+                "title": "สถิตินักท่องเที่ยว",
+                "metadata_modified": "2022-08-11T03:04:22.966032",
+                "organization": {"title": "สำนักงานปลัดกระทรวงการท่องเที่ยวและกีฬา"},
+                "resources": [{"name": "สถิตินักท่องเที่ยว ตั้งแต่ปี 2551", "url": f"{MOTS_BASE}/news/category/411"}],
+            },
+        },
+        refresh=refresh,
+    )
+    trend_inbound = fetch_json_optional(
+        TREND_INBOUND_PACKAGE_API,
+        {
+            "success": False,
+            "result": {
+                "title": "จำนวนนักท่องเที่ยวชาวต่างชาติที่เดินทางเข้าประเทศไทย",
+                "metadata_modified": "2024-08-16T03:57:42.816579",
+                "organization": {"title": "สำนักงานปลัดกระทรวงการท่องเที่ยวและกีฬา"},
+                "resources": [
+                    {
+                        "name": "จำนวนนักท่องเที่ยวชาวต่างชาติที่เดินทางมาประเทศไทยตั้งแต่ปี 1/2558 ถึง 12/2566",
+                        "url": TREND_INBOUND_CSV_URL,
+                        "resource_last_updated_date": "2024-04-02",
+                    }
+                ],
+            },
+        },
+        refresh=refresh,
+    )
     metadata = {
         "mots_category_url": f"{MOTS_BASE}/news/category/411",
         "data_go_package_api": DATA_GO_PACKAGE_API,

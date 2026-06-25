@@ -26,7 +26,9 @@ def main() -> int:
         "tourism_monthly.csv",
         "tourism_quarterly.csv",
         "tourism_annual.csv",
+        "tourism_country_monthly.csv",
         "validation_annual_worldbank.csv",
+        "validation_country_monthly.csv",
     ]:
         shutil.copy2(ROOT / "work" / "data" / filename, OUT_DIR / filename)
     print(f"Wrote {OUT_HTML}")
@@ -207,6 +209,29 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-radius: var(--radius);
     }
 
+    .select-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .select-group select {
+      min-height: 42px;
+      max-width: min(320px, 100%);
+      padding: 8px 34px 8px 10px;
+      border: 1px solid #ccd6e3;
+      border-radius: 6px;
+      color: var(--ink);
+      background: #fff;
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .select-group select[hidden] {
+      display: none;
+    }
+
     button, .check {
       font: inherit;
       color: var(--ink);
@@ -228,7 +253,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       font-weight: 700;
     }
 
-    button:focus-visible, input:focus-visible {
+    button:focus-visible, input:focus-visible, select:focus-visible {
       outline: 3px solid rgba(37, 99, 235, 0.28);
       outline-offset: 2px;
     }
@@ -558,6 +583,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       .cards { grid-template-columns: 1fr; }
       .controls { align-items: stretch; }
       .segmented, .quick-actions { width: 100%; overflow-x: auto; }
+      .select-group, .select-group select { width: 100%; }
       button { flex: 1; min-width: max-content; }
       .chart { min-height: 360px; }
       .validation-list { grid-template-columns: 1fr; }
@@ -584,6 +610,15 @@ HTML_TEMPLATE = r"""<!doctype html>
           <button type="button" data-grain="monthly" class="active">รายเดือน</button>
           <button type="button" data-grain="quarterly">รายไตรมาส</button>
           <button type="button" data-grain="annual">รายปี</button>
+        </div>
+        <div class="select-group" aria-label="ตัวกรองพื้นที่ต้นทาง">
+          <select id="segmentMode" aria-label="เลือกมุมมองรวม ทวีป หรือประเทศ">
+            <option value="total">รวมทั้งหมด</option>
+            <option value="continent">รายทวีป</option>
+            <option value="country">รายประเทศ</option>
+          </select>
+          <select id="continentSelect" aria-label="เลือกทวีป"></select>
+          <select id="countrySelect" aria-label="เลือกประเทศ"></select>
         </div>
         <div class="segmented" id="growthButtons"></div>
         <label class="check"><input id="labelToggle" type="checkbox" checked /> แสดงตัวเลขบนกราฟ</label>
@@ -649,7 +684,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <div class="panel-head">
             <div>
               <h2>ตรวจสอบตัวเลข</h2>
-              <div class="hint">สรุปผล reconciliation ของยอดรวมรายปี</div>
+              <div class="hint" id="validationHint">สรุปผล reconciliation ของยอดรวมรายปี</div>
             </div>
           </div>
           <div class="table-wrap" style="max-height: 360px;">
@@ -662,7 +697,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <section class="panel method">
       <div>
         <h2>แหล่งข้อมูลและวิธีคำนวณ</h2>
-        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนตั้งแต่ปี 2556 ถึง พ.ค. 2569 และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้</p>
+        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนตั้งแต่ปี 2556 ถึง พ.ค. 2569 และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้ ส่วนตัวกรองรายประเทศ/รายทวีปใช้ข้อมูลที่ reconcile กับยอดรวมรายเดือนได้ตั้งแต่ปี 2558 ถึงข้อมูลล่าสุด</p>
         <ul id="sourceList"></ul>
       </div>
       <div>
@@ -687,10 +722,19 @@ HTML_TEMPLATE = r"""<!doctype html>
       "#65a30d", "#ea580c", "#be123c", "#475569", "#16a34a", "#9333ea",
       "#0284c7", "#ca8a04", "#db2777", "#0f766e"
     ];
+    const COUNTRY_MONTHLY = DATA.country_monthly || [];
+    const COUNTRY_OPTIONS = DATA.country_options || [...new Set(COUNTRY_MONTHLY.map(row => row.country))].sort();
+    const CONTINENT_OPTIONS = DATA.continent_options || [...new Set(COUNTRY_MONTHLY.map(row => row.continent))].sort();
+    const DEFAULT_CONTINENT = CONTINENT_OPTIONS.includes("Asia and the Pacific") ? "Asia and the Pacific" : (CONTINENT_OPTIONS[0] || "");
+    const DEFAULT_COUNTRY = COUNTRY_OPTIONS.includes("China") ? "China" : (COUNTRY_OPTIONS[0] || "");
+    const segmentCache = { key: "", model: null };
 
     const state = {
       grain: "monthly",
       growth: "both",
+      segmentType: "total",
+      selectedContinent: DEFAULT_CONTINENT,
+      selectedCountry: DEFAULT_COUNTRY,
       selectedYears: new Set(),
       labels: true,
       selectedPoint: null,
@@ -708,6 +752,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     function pct(value) {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
       return `${Number(value).toFixed(1)}%`;
+    }
+    function pctChange(value, base) {
+      if (value === null || value === undefined || base === null || base === undefined || Number(base) === 0) return null;
+      return (Number(value) / Number(base) - 1) * 100;
     }
     function deltaClass(value) {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "neutral";
@@ -727,10 +775,180 @@ HTML_TEMPLATE = r"""<!doctype html>
       const idx = years.indexOf(year);
       return COLORS[(idx < 0 ? 0 : idx) % COLORS.length];
     }
+
+    function selectedSegmentLabel() {
+      if (state.segmentType === "continent") return `ทวีป: ${state.selectedContinent || "ทั้งหมด"}`;
+      if (state.segmentType === "country") return `ประเทศ: ${state.selectedCountry || "ทั้งหมด"}`;
+      return "รวมทุกประเทศ";
+    }
+
+    function ensureSegmentDefaults() {
+      if (!state.selectedContinent && DEFAULT_CONTINENT) state.selectedContinent = DEFAULT_CONTINENT;
+      if (!state.selectedCountry && DEFAULT_COUNTRY) state.selectedCountry = DEFAULT_COUNTRY;
+      if (state.segmentType === "continent" && !CONTINENT_OPTIONS.includes(state.selectedContinent)) {
+        state.selectedContinent = DEFAULT_CONTINENT;
+      }
+      if (state.segmentType === "country" && !COUNTRY_OPTIONS.includes(state.selectedCountry)) {
+        state.selectedCountry = DEFAULT_COUNTRY;
+      }
+    }
+
+    function resetSelection() {
+      state.selectedPoint = null;
+      state.pointLookup = new Map();
+      segmentCache.key = "";
+      segmentCache.model = null;
+    }
+
+    function currentSegmentKey() {
+      return `${state.segmentType}|${state.selectedContinent}|${state.selectedCountry}`;
+    }
+
+    function matchingCountryRows() {
+      if (state.segmentType === "country") {
+        return COUNTRY_MONTHLY.filter(row => row.country === state.selectedCountry);
+      }
+      if (state.segmentType === "continent") {
+        return COUNTRY_MONTHLY.filter(row => row.continent === state.selectedContinent);
+      }
+      return [];
+    }
+
+    function aggregateMonthlyRows(rows) {
+      const grouped = new Map();
+      rows.forEach(row => {
+        const year = Number(row.year);
+        const month = Number(row.month);
+        const key = `${year}-${month}`;
+        if (!grouped.has(key)) {
+          grouped.set(key, {
+            year,
+            month,
+            date: `${year}-${String(month).padStart(2, "0")}-01`,
+            arrivals: 0,
+            source_published: row.source_published,
+            source_file_url: row.source_file_url,
+            segment_type: state.segmentType,
+            segment_label: selectedSegmentLabel()
+          });
+        }
+        const target = grouped.get(key);
+        target.arrivals += Number(row.arrivals || 0);
+        if (!target.source_file_url && row.source_file_url) target.source_file_url = row.source_file_url;
+        if (!target.source_published && row.source_published) target.source_published = row.source_published;
+      });
+      const sorted = [...grouped.values()].sort((a, b) => a.year - b.year || a.month - b.month);
+      const lookup = new Map(sorted.map(row => [`${row.year}-${row.month}`, row.arrivals]));
+      let previous = null;
+      return sorted.map(row => {
+        const out = {
+          ...row,
+          mom_pct: pctChange(row.arrivals, previous),
+          yoy_pct: pctChange(row.arrivals, lookup.get(`${row.year - 1}-${row.month}`)),
+          month_name: MONTHS_TH[row.month - 1]
+        };
+        previous = row.arrivals;
+        return out;
+      });
+    }
+
+    function deriveQuarterlyRows(monthlyRows) {
+      const byYear = new Map();
+      monthlyRows.forEach(row => {
+        if (!byYear.has(row.year)) byYear.set(row.year, new Map());
+        byYear.get(row.year).set(row.month, row);
+      });
+      const rows = [];
+      byYear.forEach((monthMap, year) => {
+        for (let quarter = 1; quarter <= 4; quarter += 1) {
+          const months = [(quarter - 1) * 3 + 1, (quarter - 1) * 3 + 2, (quarter - 1) * 3 + 3];
+          if (!months.every(month => monthMap.has(month))) continue;
+          const monthRows = months.map(month => monthMap.get(month));
+          rows.push({
+            year,
+            quarter,
+            period: `Q${quarter}`,
+            date: `${year}-${String(months[0]).padStart(2, "0")}-01`,
+            arrivals: monthRows.reduce((sum, row) => sum + Number(row.arrivals || 0), 0),
+            source_published: monthRows[monthRows.length - 1].source_published,
+            source_file_url: monthRows[monthRows.length - 1].source_file_url,
+            segment_type: state.segmentType,
+            segment_label: selectedSegmentLabel()
+          });
+        }
+      });
+      rows.sort((a, b) => a.year - b.year || a.quarter - b.quarter);
+      const lookup = new Map(rows.map(row => [`${row.year}-${row.quarter}`, row.arrivals]));
+      let previous = null;
+      rows.forEach(row => {
+        row.qoq_pct = pctChange(row.arrivals, previous);
+        row.yoy_pct = pctChange(row.arrivals, lookup.get(`${row.year - 1}-${row.quarter}`));
+        previous = row.arrivals;
+      });
+      return rows;
+    }
+
+    function deriveAnnualRows(monthlyRows) {
+      const byYear = new Map();
+      monthlyRows.forEach(row => {
+        if (!byYear.has(row.year)) byYear.set(row.year, []);
+        byYear.get(row.year).push(row);
+      });
+      const rows = [...byYear.entries()].map(([year, yearRows]) => {
+        const months = [...new Set(yearRows.map(row => row.month))].sort((a, b) => a - b);
+        const latestSource = yearRows.slice().sort((a, b) => a.month - b.month).at(-1) || {};
+        return {
+          year,
+          date: `${year}-01-01`,
+          arrivals: yearRows.reduce((sum, row) => sum + Number(row.arrivals || 0), 0),
+          months: months.length,
+          is_full_year: months.length === 12,
+          annual_only: false,
+          source_published: latestSource.source_published,
+          source_file_url: latestSource.source_file_url,
+          segment_type: state.segmentType,
+          segment_label: selectedSegmentLabel()
+        };
+      }).sort((a, b) => a.year - b.year);
+      const monthlyLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row.arrivals]));
+      const annualLookup = new Map(rows.map(row => [row.year, row.arrivals]));
+      rows.forEach(row => {
+        if (row.months === 12) {
+          row.yoy_basis = "full_year";
+          row.yoy_pct = pctChange(row.arrivals, annualLookup.get(row.year - 1));
+        } else {
+          const baseMonths = Array.from({ length: row.months }, (_, idx) => idx + 1).map(month => monthlyLookup.get(`${row.year - 1}-${month}`));
+          const base = baseMonths.every(value => value !== undefined) ? baseMonths.reduce((sum, value) => sum + Number(value), 0) : null;
+          row.yoy_basis = `YTD same ${row.months} months`;
+          row.yoy_pct = pctChange(row.arrivals, base);
+        }
+      });
+      return rows;
+    }
+
+    function currentModel() {
+      ensureSegmentDefaults();
+      if (state.segmentType === "total") {
+        return { monthly: DATA.monthly, quarterly: DATA.quarterly, annual: DATA.annual };
+      }
+      const key = currentSegmentKey();
+      if (segmentCache.key === key && segmentCache.model) return segmentCache.model;
+      const monthly = aggregateMonthlyRows(matchingCountryRows());
+      const model = {
+        monthly,
+        quarterly: deriveQuarterlyRows(monthly),
+        annual: deriveAnnualRows(monthly)
+      };
+      segmentCache.key = key;
+      segmentCache.model = model;
+      return model;
+    }
+
     function rowsForGrain(grain = state.grain) {
-      if (grain === "quarterly") return DATA.quarterly;
-      if (grain === "annual") return DATA.annual;
-      return DATA.monthly;
+      const model = currentModel();
+      if (grain === "quarterly") return model.quarterly;
+      if (grain === "annual") return model.annual;
+      return model.monthly;
     }
     function defaultYears() {
       const years = uniqueYears(rowsForGrain());
@@ -748,10 +966,29 @@ HTML_TEMPLATE = r"""<!doctype html>
         button.addEventListener("click", () => {
           state.grain = button.dataset.grain;
           state.growth = state.grain === "annual" ? "yoy" : "both";
-          state.selectedPoint = null;
+          resetSelection();
           ensureYears();
           render();
         });
+      });
+      document.getElementById("segmentMode").addEventListener("change", event => {
+        state.segmentType = event.target.value;
+        ensureSegmentDefaults();
+        resetSelection();
+        state.selectedYears = new Set(defaultYears());
+        render();
+      });
+      document.getElementById("continentSelect").addEventListener("change", event => {
+        state.selectedContinent = event.target.value;
+        resetSelection();
+        state.selectedYears = new Set(defaultYears());
+        render();
+      });
+      document.getElementById("countrySelect").addEventListener("change", event => {
+        state.selectedCountry = event.target.value;
+        resetSelection();
+        state.selectedYears = new Set(defaultYears());
+        render();
       });
       document.getElementById("labelToggle").addEventListener("change", event => {
         state.labels = event.target.checked;
@@ -760,19 +997,32 @@ HTML_TEMPLATE = r"""<!doctype html>
       });
       document.getElementById("lastSix").addEventListener("click", () => {
         state.selectedYears = new Set(defaultYears());
-        state.selectedPoint = null;
+        resetSelection();
         render();
       });
       document.getElementById("allYears").addEventListener("click", () => {
         state.selectedYears = new Set(uniqueYears(rowsForGrain()));
-        state.selectedPoint = null;
+        resetSelection();
         render();
       });
       document.getElementById("clearYears").addEventListener("click", () => {
         state.selectedYears = new Set();
-        state.selectedPoint = null;
+        resetSelection();
         render();
       });
+    }
+
+    function renderSegmentControls() {
+      const mode = document.getElementById("segmentMode");
+      const continentSelect = document.getElementById("continentSelect");
+      const countrySelect = document.getElementById("countrySelect");
+      mode.value = state.segmentType;
+      continentSelect.hidden = state.segmentType !== "continent";
+      countrySelect.hidden = state.segmentType !== "country";
+      continentSelect.innerHTML = CONTINENT_OPTIONS.map(item => `<option value="${attrEscape(item)}">${htmlEscape(item)}</option>`).join("");
+      countrySelect.innerHTML = COUNTRY_OPTIONS.map(item => `<option value="${attrEscape(item)}">${htmlEscape(item)}</option>`).join("");
+      continentSelect.value = state.selectedContinent;
+      countrySelect.value = state.selectedCountry;
     }
 
     function renderGrowthButtons() {
@@ -816,18 +1066,33 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderKpis() {
-      const latestMonth = DATA.monthly[DATA.monthly.length - 1];
+      const model = currentModel();
+      const latestMonth = model.monthly[model.monthly.length - 1];
+      if (!latestMonth) {
+        document.getElementById("kpiCards").innerHTML = `
+          <article class="card">
+            <div class="label">${htmlEscape(selectedSegmentLabel())}</div>
+            <div>
+              <div class="value">n/a</div>
+              <div class="note">ไม่มีข้อมูลสำหรับตัวกรองนี้</div>
+            </div>
+            <div class="delta neutral">No data</div>
+          </article>
+        `;
+        document.getElementById("freshnessPill").textContent = `ไม่มีข้อมูล | build __BUILD_DATE__`;
+        return;
+      }
       const currentYtdYear = latestMonth.year;
       const ytdMonths = latestMonth.month;
-      const currentYtd = DATA.monthly.filter(row => row.year === currentYtdYear && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
-      const previousYtd = DATA.monthly.filter(row => row.year === currentYtdYear - 1 && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
+      const currentYtd = model.monthly.filter(row => row.year === currentYtdYear && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
+      const previousYtd = model.monthly.filter(row => row.year === currentYtdYear - 1 && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
       const ytdYoY = previousYtd ? ((currentYtd - previousYtd) / previousYtd) * 100 : null;
-      const fullYears = DATA.annual.filter(row => row.is_full_year && row.months === 12);
+      const fullYears = model.annual.filter(row => row.is_full_year && row.months === 12);
       const latestFull = fullYears[fullYears.length - 1];
-      const peak = fullYears.reduce((best, row) => row.arrivals > best.arrivals ? row : best, fullYears[0]);
+      const peak = fullYears.length ? fullYears.reduce((best, row) => row.arrivals > best.arrivals ? row : best, fullYears[0]) : null;
       const cards = [
         {
-          label: `เดือนล่าสุด ${dateText(latestMonth.date)}`,
+          label: `เดือนล่าสุด ${dateText(latestMonth.date)} | ${selectedSegmentLabel()}`,
           value: shortNumber(latestMonth.arrivals),
           note: `${number(latestMonth.arrivals)} คน`,
           delta: `YoY ${pct(latestMonth.yoy_pct)}`,
@@ -841,17 +1106,17 @@ HTML_TEMPLATE = r"""<!doctype html>
           deltaValue: ytdYoY
         },
         {
-          label: `ปีล่าสุดเต็มปี ${be(latestFull.year)}`,
-          value: shortNumber(latestFull.arrivals),
-          note: `${number(latestFull.arrivals)} คน`,
-          delta: `YoY ${pct(latestFull.yoy_pct)}`,
-          deltaValue: latestFull.yoy_pct
+          label: latestFull ? `ปีล่าสุดเต็มปี ${be(latestFull.year)}` : "ปีล่าสุดเต็มปี",
+          value: latestFull ? shortNumber(latestFull.arrivals) : "n/a",
+          note: latestFull ? `${number(latestFull.arrivals)} คน` : "ยังไม่มีปีเต็มในตัวกรองนี้",
+          delta: latestFull ? `YoY ${pct(latestFull.yoy_pct)}` : "n/a",
+          deltaValue: latestFull ? latestFull.yoy_pct : null
         },
         {
-          label: `ปีสูงสุดในชุดข้อมูล ${be(peak.year)}`,
-          value: shortNumber(peak.arrivals),
-          note: `${number(peak.arrivals)} คน`,
-          delta: "Peak full-year",
+          label: peak ? `ปีสูงสุดในชุดข้อมูล ${be(peak.year)}` : "ปีสูงสุดในชุดข้อมูล",
+          value: peak ? shortNumber(peak.arrivals) : "n/a",
+          note: peak ? `${number(peak.arrivals)} คน` : "ยังไม่มีปีเต็มในตัวกรองนี้",
+          delta: peak ? "Peak full-year" : "n/a",
           deltaValue: null
         }
       ];
@@ -865,7 +1130,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <div class="delta ${deltaClass(card.deltaValue)}">${card.delta}</div>
         </article>
       `).join("");
-      document.getElementById("freshnessPill").textContent = `ข้อมูลล่าสุด: ${dateText(latestMonth.date)} | build __BUILD_DATE__`;
+      document.getElementById("freshnessPill").textContent = `ข้อมูลล่าสุด: ${dateText(latestMonth.date)} | ${selectedSegmentLabel()} | build __BUILD_DATE__`;
     }
 
     function xDomainForGrain() {
@@ -981,14 +1246,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         ? `MoM ${pct(row.mom_pct)} | YoY ${pct(row.yoy_pct)}`
         : `QoQ ${pct(row.qoq_pct)} | YoY ${pct(row.yoy_pct)}`;
       const main = label === "จำนวน" ? `${number(value)} คน` : pct(value);
-      return `<b>${periodName(row)}</b><br>${label}: ${main}<br><span class="muted">จำนวน: ${number(row.arrivals)} คน<br>${growth}</span>`;
+      return `<b>${periodName(row)}</b><br>${htmlEscape(row.segment_label || selectedSegmentLabel())}<br>${label}: ${main}<br><span class="muted">จำนวน: ${number(row.arrivals)} คน<br>${growth}</span>`;
     }
 
     function annualTip(row, label, value = row.arrivals) {
       const suffix = row.is_full_year ? "เต็มปี" : `${row.months} เดือน`;
       const yoyBasis = row.yoy_basis === "full_year" ? "full-year" : (row.yoy_basis || "");
       const main = label === "จำนวน" ? `${number(value)} คน` : pct(value);
-      return `<b>ปี ${be(row.year)} (${row.year})</b><br>${label}: ${main}<br><span class="muted">สถานะ: ${suffix}<br>YoY: ${pct(row.yoy_pct)} ${yoyBasis ? "(" + yoyBasis + ")" : ""}</span>`;
+      return `<b>ปี ${be(row.year)} (${row.year})</b><br>${htmlEscape(row.segment_label || selectedSegmentLabel())}<br>${label}: ${main}<br><span class="muted">สถานะ: ${suffix}<br>YoY: ${pct(row.yoy_pct)} ${yoyBasis ? "(" + yoyBasis + ")" : ""}</span>`;
     }
 
     function renderLineChart(targetId, legendId, series, options) {
@@ -1126,11 +1391,12 @@ HTML_TEMPLATE = r"""<!doctype html>
           ? [["QoQ", row.qoq_pct], ["YoY", row.yoy_pct]]
           : [["YoY", row.yoy_pct], ["เกณฑ์ YoY", row.yoy_basis === "full_year" ? "เต็มปี" : (row.yoy_basis || "n/a")]];
       const status = row.is_full_year === false ? "YTD" : row.annual_only ? "Annual-only" : "ปกติ";
+      const segment = row.segment_label || selectedSegmentLabel();
       const source = row.source_file_url ? `<a href="${htmlEscape(row.source_file_url)}">เปิดไฟล์ต้นทาง</a>` : "รวมจากข้อมูลรายเดือน";
       host.innerHTML = `
         <div class="selected-main">
           <div>
-            <div class="selected-kicker">${htmlEscape(selected.seriesKey)} | ${htmlEscape(selected.metricLabel)}</div>
+            <div class="selected-kicker">${htmlEscape(segment)} | ${htmlEscape(selected.seriesKey)} | ${htmlEscape(selected.metricLabel)}</div>
             <div class="selected-value" style="color:${htmlEscape(selected.color)}">${htmlEscape(selected.metricDisplay)}</div>
             <div class="note">${htmlEscape(selected.period)} | จำนวน ${number(row.arrivals)} คน</div>
           </div>
@@ -1166,13 +1432,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       state.pointLookup = new Map();
       const rows = selectedRows();
       const period = state.grain === "monthly" ? "รายเดือน" : state.grain === "quarterly" ? "รายไตรมาส" : "รายปี";
-      document.getElementById("arrivalsTitle").textContent = `จำนวนผู้เดินทางเข้าไทย (${period})`;
+      const segment = selectedSegmentLabel();
+      document.getElementById("arrivalsTitle").textContent = `จำนวนผู้เดินทางเข้าไทย (${period}) | ${segment}`;
       document.getElementById("arrivalsHint").textContent = state.grain === "annual"
-        ? "เส้นรายปีแสดงยอดรวมของแต่ละปี โดยปี 2569 เป็น YTD"
+        ? "เส้นรายปีแสดงยอดรวมของแต่ละปีในตัวกรองนี้ โดยปี 2569 เป็น YTD ถ้ามีข้อมูลถึงล่าสุด"
         : "หนึ่งเส้นต่อหนึ่งปี สีแยกปีตามตัวกรอง";
       document.getElementById("growthTitle").textContent = `การเติบโต (${growthFields().map(item => item[1]).join(" + ")})`;
       document.getElementById("growthHint").textContent = state.grain === "annual"
-        ? "YoY เทียบยอดรวมรายปีกับปีก่อนหน้า"
+        ? "YoY เทียบยอดรวมรายปีกับปีก่อนหน้าของตัวกรองเดียวกัน"
         : "เส้นทึบคือ period-on-period และเส้นประคือ YoY เมื่อเลือกดูพร้อมกัน";
       renderLineChart("arrivalsChart", "arrivalsLegend", buildArrivalSeries(rows), {
         title: "Tourist arrivals",
@@ -1193,7 +1460,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         return b.year - a.year || bx - ax;
       });
       const table = document.getElementById("detailTable");
-      document.getElementById("tableHint").textContent = `${rows.length} แถว จากตัวกรองปีที่เลือก`;
+      document.getElementById("tableHint").textContent = `${rows.length} แถว | ${selectedSegmentLabel()} | จากตัวกรองปีที่เลือก`;
       let header = "";
       let body = "";
       if (state.grain === "monthly") {
@@ -1205,7 +1472,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <td class="${deltaClass(row.mom_pct)}">${pct(row.mom_pct)}</td>
           <td class="${deltaClass(row.yoy_pct)}">${pct(row.yoy_pct)}</td>
           <td>${row.source_published ? row.source_published.slice(0, 10) : ""}</td>
-          <td><a href="${htmlEscape(row.source_file_url)}">MOTS</a></td>
+          <td>${row.source_file_url ? `<a href="${htmlEscape(row.source_file_url)}">MOTS</a>` : "รวม"}</td>
         </tr>`).join("");
       } else if (state.grain === "quarterly") {
         header = "<tr><th>ช่วงเวลา</th><th>ปี</th><th>จำนวน</th><th>QoQ</th><th>YoY</th><th>หมายเหตุ</th></tr>";
@@ -1235,6 +1502,12 @@ HTML_TEMPLATE = r"""<!doctype html>
     function renderValidation() {
       const table = document.getElementById("validationTable");
       const rows = DATA.validation.slice().sort((a, b) => b.year - a.year);
+      const countryValidation = DATA.country_validation || [];
+      const countryMatches = countryValidation.filter(row => row.status === "Match").length;
+      const countryNoRows = countryValidation.filter(row => row.status === "No country rows").length;
+      const countryYears = uniqueYears(DATA.country_monthly || []);
+      document.getElementById("validationHint").textContent =
+        `ยอดรวมรายปี + รายประเทศ: ${countryMatches} เดือน reconcile ตรงกับยอดรวม; ${countryNoRows} เดือนเป็น total-only | รายประเทศครอบคลุม ${countryYears.length ? be(countryYears[0]) + "-" + be(countryYears[countryYears.length - 1]) : "n/a"}`;
       table.innerHTML = `<thead><tr><th>ปี</th><th>ยอด MOTS</th><th>แหล่งตรวจซ้ำ</th><th>ผลต่าง</th><th>สถานะ</th></tr></thead><tbody>
         ${rows.map(row => {
           const hasWb = row.world_bank_total !== null && row.world_bank_total !== undefined && row.world_bank_total !== "";
@@ -1257,19 +1530,23 @@ HTML_TEMPLATE = r"""<!doctype html>
       const trendResource = (meta.trend_inbound_result.resources || [])[0] || {};
       const statResource = (meta.data_go_result.resources || [])[0] || {};
       const latest = DATA.monthly[DATA.monthly.length - 1];
+      const countryYears = uniqueYears(DATA.country_monthly || []);
       const sourceList = document.getElementById("sourceList");
       sourceList.innerHTML = `
         <li><a href="${htmlEscape(meta.mots_category_url)}">MOTS สถิตินักท่องเที่ยว category 411</a> แหล่งเผยแพร่ไฟล์รายเดือนของสำนักงานปลัดกระทรวงการท่องเที่ยวและกีฬา</li>
         <li><a href="${htmlEscape(meta.data_go_package_api)}">data.go.th: ${htmlEscape(meta.data_go_result.title)}</a> metadata modified ${htmlEscape((meta.data_go_result.metadata_modified || "").slice(0, 10))}; resource ชี้ไปหน้า MOTS category 411</li>
         <li><a href="${htmlEscape(meta.trend_inbound_package_api)}">data.go.th: ${htmlEscape(meta.trend_inbound_result.title)}</a> metadata modified ${htmlEscape((meta.trend_inbound_result.metadata_modified || "").slice(0, 10))}; CSV resource updated ${htmlEscape(trendResource.resource_last_updated_date || (trendResource.last_modified || "").slice(0, 10))}</li>
         <li><a href="${htmlEscape(latest.source_file_url)}">MOTS latest workbook</a> เผยแพร่ ${htmlEscape((latest.source_published || "").slice(0, 10))} ครอบคลุมถึง ${dateText(latest.date)}</li>
+        <li>ตัวกรองรายประเทศ/รายทวีปใช้ country-level CSV จาก data.go.th/MOTS ร่วมกับ workbook รายเดือนล่าสุดของ MOTS ครอบคลุม ${countryYears.length ? be(countryYears[0]) + "-" + be(countryYears[countryYears.length - 1]) : "n/a"}; ไฟล์ประเทศปี 2556-2557 ที่ตรวจพบถูกกันออกจาก filter เพราะยอดประเทศรวมแล้วไม่ตรงกับ Grand Total</li>
         <li><a href="${htmlEscape(meta.world_bank_api)}">World Bank ST.INT.ARVL API</a> ใช้ตรวจยอดรายปี 2555-2562 โดยต่างกันเพียงระดับ rounding ของ annual arrivals</li>
       `;
     }
 
     function render() {
+      ensureSegmentDefaults();
       ensureYears();
       document.querySelectorAll("#grainButtons button").forEach(button => button.classList.toggle("active", button.dataset.grain === state.grain));
+      renderSegmentControls();
       renderGrowthButtons();
       renderYearStrip();
       renderKpis();

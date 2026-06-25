@@ -306,7 +306,7 @@ def try_download_text(url: str, destination: Path, refresh: bool = False) -> tup
     if destination.exists() and destination.stat().st_size > 0 and not refresh:
         content = destination.read_bytes()
         return destination, content.decode("utf-8-sig", errors="replace"), content
-    response = requests.get(url, timeout=60)
+    response = requests.get(url, timeout=60, headers=REQUEST_HEADERS)
     response.raise_for_status()
     content = response.content
     if len(content) < 1000:
@@ -349,6 +349,69 @@ def parse_year(value: Any) -> int | None:
     return None
 
 
+CONTINENT_LABELS = {
+    "Asia and the Pacific",
+    "Europe",
+    "America",
+    "Middle East",
+    "Africa",
+    "other",
+}
+
+REGION_TO_CONTINENT = {
+    "East Asia": "Asia and the Pacific",
+    "ASEAN": "Asia and the Pacific",
+    "South-East Asia": "Asia and the Pacific",
+    "North-East Asia": "Asia and the Pacific",
+    "South Asia": "Asia and the Pacific",
+    "Oceania": "Asia and the Pacific",
+    "Northern Europe": "Europe",
+    "Western Europe": "Europe",
+    "Central/Eastern Europe": "Europe",
+    "East Europe": "Europe",
+    "Southern/Medit. Europe": "Europe",
+    "The Americas": "America",
+    "North America": "America",
+    "Central America": "America",
+    "Caribbean": "America",
+    "South America": "America",
+    "North africa": "Africa",
+    "Sub-Saharan Africa": "Africa",
+}
+
+COUNTRY_ALIASES = {
+    "Hong Kong": "Hong Kong (China)",
+    "Korea": "Korea (Republic of)",
+    "Russia": "Russian Federation",
+    "USA": "The United States of America",
+    "South Africa": "South  Africa",
+}
+
+
+def clean_country_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", value_to_text(value)).strip()
+
+
+def normalize_country_name(label: str, continent: str | None) -> str:
+    clean = clean_country_label(label)
+    if clean == "Others":
+        return f"Other in {continent or 'other'}"
+    return COUNTRY_ALIASES.get(clean, clean)
+
+
+def classify_geo_label(label: str) -> tuple[str, str | None]:
+    clean = clean_country_label(label)
+    if not clean:
+        return "blank", None
+    if clean == "Grand Total":
+        return "total", None
+    if clean in CONTINENT_LABELS:
+        return "continent", clean
+    if clean in REGION_TO_CONTINENT:
+        return "region", REGION_TO_CONTINENT[clean]
+    return "country", None
+
+
 def is_stop_label(value: Any) -> bool:
     label = normalize_label(value)
     return any(token in label for token in ["ytd", "total", "รวม", "change", "chang"])
@@ -375,7 +438,7 @@ def to_number(value: Any) -> int | None:
 def iter_sheet_rows(path: Path) -> list[tuple[str, list[list[Any]]]]:
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=False)
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
         sheets = []
         for name in wb.sheetnames:
             ws = wb[name]
@@ -554,6 +617,122 @@ def extract_workbook_monthlies(path: Path, default_year: int) -> tuple[dict[int,
         return multi
     months, note = extract_monthly_from_workbook(path)
     return {default_year: months}, note
+
+
+def extract_country_monthly_from_old_sheets(path: Path, default_year: int) -> tuple[list[dict[str, Any]], str] | None:
+    rows_out: list[dict[str, Any]] = []
+    for sheet_name, rows in iter_sheet_rows(path):
+        month = parse_month(sheet_name)
+        if month is None:
+            continue
+        total_row = find_total_row(rows)
+        if total_row is None:
+            continue
+        continent = "Asia and the Pacific"
+        for idx in range(5, total_row):
+            row = rows[idx]
+            label = clean_country_label(row[0] if row else None)
+            kind, mapped_continent = classify_geo_label(label)
+            if kind in {"blank", "total"}:
+                continue
+            if kind in {"continent", "region"}:
+                continent = mapped_continent or label
+                continue
+            number = to_number(row[1] if len(row) > 1 else None)
+            if number is None:
+                continue
+            country = normalize_country_name(label, continent)
+            rows_out.append(
+                {
+                    "year": default_year,
+                    "month": month,
+                    "date": f"{default_year}-{month:02d}-01",
+                    "country": country,
+                    "continent": continent or "other",
+                    "region": continent or "other",
+                    "arrivals": number,
+                }
+            )
+    if not rows_out:
+        return None
+    return rows_out, "country_monthly_sheets"
+
+
+def extract_country_monthly_from_year_blocks(path: Path) -> tuple[list[dict[str, Any]], str] | None:
+    for sheet_name, rows in iter_sheet_rows(path):
+        total_row = find_total_row(rows)
+        if total_row is None:
+            continue
+        for header_idx in range(1, min(total_row, 10)):
+            header = rows[header_idx]
+            year_row = rows[header_idx - 1]
+            year_groups: list[dict[str, Any]] = []
+            active_year: int | None = None
+            active_months: list[tuple[int, int]] = []
+            for col, header_value in enumerate(header):
+                possible_year = parse_year(year_row[col] if col < len(year_row) else None)
+                if possible_year is not None:
+                    if active_year is not None and active_months:
+                        year_groups.append({"year": active_year, "months": active_months})
+                    active_year = possible_year
+                    active_months = []
+                month = parse_month(header_value)
+                if active_year is not None and month is not None:
+                    active_months.append((col, month))
+                if active_year is not None and active_months and is_stop_label(header_value):
+                    year_groups.append({"year": active_year, "months": active_months})
+                    active_year = None
+                    active_months = []
+            if active_year is not None and active_months:
+                year_groups.append({"year": active_year, "months": active_months})
+            if not year_groups:
+                continue
+
+            rows_out: list[dict[str, Any]] = []
+            continent = "Asia and the Pacific"
+            region = "Asia and the Pacific"
+            for idx in range(header_idx + 1, total_row):
+                row = rows[idx]
+                label = clean_country_label(row[0] if row else None)
+                kind, mapped_continent = classify_geo_label(label)
+                if kind in {"blank", "total"}:
+                    continue
+                if kind == "continent":
+                    continent = mapped_continent or label
+                    region = label
+                    continue
+                if kind == "region":
+                    continent = mapped_continent or continent
+                    region = label
+                    continue
+                country = normalize_country_name(label, continent)
+                for group in year_groups:
+                    year = int(group["year"])
+                    for col, month in group["months"]:
+                        number = to_number(row[col] if col < len(row) else None)
+                        if number is None:
+                            continue
+                        rows_out.append(
+                            {
+                                "year": year,
+                                "month": month,
+                                "date": f"{year}-{month:02d}-01",
+                                "country": country,
+                                "continent": continent or "other",
+                                "region": region or continent or "other",
+                                "arrivals": number,
+                            }
+                        )
+            if rows_out:
+                return rows_out, f"country_year_blocks; sheet={sheet_name}; header_row={header_idx + 1}; total_row={total_row + 1}"
+    return None
+
+
+def extract_workbook_country_monthlies(path: Path, default_year: int) -> tuple[list[dict[str, Any]], str] | None:
+    modern = extract_country_monthly_from_year_blocks(path)
+    if modern is not None:
+        return modern
+    return extract_country_monthly_from_old_sheets(path, default_year)
 
 
 def extract_annual_total_arrivals(path: Path) -> tuple[int, str]:
@@ -783,6 +962,96 @@ def select_best_monthly_rows(monthly_rows: list[dict[str, Any]]) -> list[dict[st
     return final_rows
 
 
+def select_country_rows_for_monthlies(
+    country_rows: list[dict[str, Any]], monthly_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    source_by_year = {int(row["year"]): int(row["source_article_id"]) for row in monthly_rows}
+    selected = [
+        row
+        for row in country_rows
+        if int(row["source_article_id"]) == source_by_year.get(int(row["year"]))
+    ]
+    return sorted(selected, key=lambda row: (row["year"], row["month"], row["country"]))
+
+
+def download_and_parse_selected_country_rows(
+    files: list[NewsFile],
+    selected_article_ids: set[int],
+    refresh: bool = False,
+) -> list[dict[str, Any]]:
+    country_rows: list[dict[str, Any]] = []
+    for source in files:
+        if source.article_id not in selected_article_ids:
+            continue
+        suffix = Path(urlparse(source.file_url).path).suffix.lower() or ".xlsx"
+        filename = f"{source.year}_{source.category_id}_{source.article_id}_{slugify(source.title, 60)}{suffix}"
+        local = FILES / filename
+        try:
+            local, content = try_download(source.file_url, local, refresh=refresh)
+            country_parse = extract_workbook_country_monthlies(local, source.year)
+            if country_parse is None:
+                continue
+            parsed_country_rows, country_note = country_parse
+            counts_by_year = {
+                year: len({row["month"] for row in parsed_country_rows if row["year"] == year})
+                for year in {row["year"] for row in parsed_country_rows}
+            }
+            source_sha = hashlib.sha256(content).hexdigest()
+            local_path = str(local.relative_to(ROOT))
+            for row in parsed_country_rows:
+                country_rows.append(
+                    {
+                        **row,
+                        "source_article_id": source.article_id,
+                        "source_year_month_count": counts_by_year.get(row["year"], 0),
+                        "source_title": source.title,
+                        "source_published": source.published,
+                        "source_page_url": source.page_url,
+                        "source_file_url": source.file_url,
+                        "source_local_file": local_path,
+                        "source_sha256": source_sha,
+                        "parse_note": country_note,
+                    }
+                )
+        except Exception:
+            continue
+    return sorted(country_rows, key=lambda row: (row["year"], row["month"], row["country"], row["source_article_id"]))
+
+
+def build_country_validation(
+    country_rows: list[dict[str, Any]], monthly_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    totals_by_month = {(int(row["year"]), int(row["month"])): int(row["arrivals"]) for row in monthly_rows}
+    country_totals: dict[tuple[int, int], int] = {}
+    country_counts: dict[tuple[int, int], int] = {}
+    for row in country_rows:
+        key = (int(row["year"]), int(row["month"]))
+        country_totals[key] = country_totals.get(key, 0) + int(row["arrivals"])
+        country_counts[key] = country_counts.get(key, 0) + 1
+    validation = []
+    for key, total in sorted(totals_by_month.items()):
+        country_total = country_totals.get(key)
+        validation.append(
+            {
+                "year": key[0],
+                "month": key[1],
+                "date": f"{key[0]}-{key[1]:02d}-01",
+                "mots_total": total,
+                "country_total": country_total,
+                "country_count": country_counts.get(key, 0),
+                "difference": None if country_total is None else total - country_total,
+                "status": (
+                    "No country rows"
+                    if country_total is None
+                    else "Match"
+                    if abs(total - country_total) <= 2
+                    else "Review"
+                ),
+            }
+        )
+    return validation
+
+
 def load_trend_inbound_monthlies(refresh: bool = False) -> tuple[list[dict[str, Any]], NewsFile]:
     local = FILES / "data_go_trend_inbound_tourists_2015_2023.csv"
     local, text, content = try_download_text(TREND_INBOUND_CSV_URL, local, refresh=refresh)
@@ -847,6 +1116,57 @@ def load_trend_inbound_monthlies(refresh: bool = False) -> tuple[list[dict[str, 
             }
         )
     return monthly_rows, source
+
+
+def load_trend_inbound_country_monthlies(refresh: bool = False) -> list[dict[str, Any]]:
+    local = FILES / "data_go_trend_inbound_tourists_2015_2023.csv"
+    local, text, content = try_download_text(TREND_INBOUND_CSV_URL, local, refresh=refresh)
+    reader = csv.DictReader(text.splitlines())
+    number_col = next((name for name in reader.fieldnames or [] if "Number" in name), None)
+    if number_col is None:
+        raise ValueError("trend inbound CSV has no Number column")
+    rows: list[dict[str, Any]] = []
+    month_counts: dict[int, set[int]] = {}
+    source_sha = hashlib.sha256(content).hexdigest()
+    local_path = str(local.relative_to(ROOT))
+    for row in reader:
+        date_text = value_to_text(row.get("date"))
+        parts = date_text.split("/")
+        if len(parts) != 3:
+            continue
+        _day, month_raw, year_raw = parts
+        year = int(year_raw)
+        month = int(month_raw)
+        country = normalize_country_name(clean_country_label(row.get("Country")), clean_country_label(row.get("continent")))
+        continent = clean_country_label(row.get("continent")) or "other"
+        region = clean_country_label(row.get("Region")) or continent
+        raw = value_to_text(row.get(number_col))
+        clean = re.sub(r"[^0-9-]", "", raw)
+        arrivals = 0 if clean in {"", "-"} else int(clean)
+        rows.append(
+            {
+                "year": year,
+                "month": month,
+                "date": f"{year}-{month:02d}-01",
+                "country": country,
+                "continent": continent,
+                "region": region,
+                "arrivals": arrivals,
+                "source_article_id": 900001,
+                "source_year_month_count": 0,
+                "source_title": "data.go.th / MOTS: trend_inbound_tourists monthly country-level CSV",
+                "source_published": "2024-04-02T00:00:00+00:00",
+                "source_page_url": "https://data.go.th/dataset/trend_inbound_tourists",
+                "source_file_url": TREND_INBOUND_CSV_URL,
+                "source_local_file": local_path,
+                "source_sha256": source_sha,
+                "parse_note": "country_month_csv; source dates are day/month/year",
+            }
+        )
+        month_counts.setdefault(year, set()).add(month)
+    for row in rows:
+        row["source_year_month_count"] = len(month_counts.get(row["year"], set()))
+    return sorted(rows, key=lambda row: (row["year"], row["month"], row["country"]))
 
 
 def load_annual_extras(refresh: bool = False) -> tuple[list[dict[str, Any]], list[NewsFile]]:
@@ -966,7 +1286,23 @@ def build_derived(
     wb_values: dict[int, int],
     annual_extras: list[dict[str, Any]] | None = None,
     receipt_validations: dict[int, dict[str, Any]] | None = None,
+    country_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    compact_country_rows = [
+        {
+            "year": int(row["year"]),
+            "month": int(row["month"]),
+            "date": row["date"],
+            "country": row["country"],
+            "continent": row["continent"],
+            "region": row.get("region") or row["continent"],
+            "arrivals": int(row["arrivals"]),
+            "source_article_id": row.get("source_article_id"),
+            "source_published": row.get("source_published"),
+            "source_file_url": row.get("source_file_url"),
+        }
+        for row in (country_rows or [])
+    ]
     by_year: dict[int, list[dict[str, Any]]] = {}
     for row in monthly_rows:
         by_year.setdefault(int(row["year"]), []).append(row)
@@ -1069,6 +1405,10 @@ def build_derived(
         "quarterly": quarterly,
         "annual": annual,
         "validation": validation,
+        "country_monthly": compact_country_rows,
+        "country_validation": build_country_validation(compact_country_rows, monthly_rows),
+        "country_options": sorted({row["country"] for row in compact_country_rows}),
+        "continent_options": sorted({row["continent"] for row in compact_country_rows}),
     }
 
 
@@ -1112,9 +1452,17 @@ def main(argv: list[str] | None = None) -> int:
     source_files, metadata = crawl_mots(refresh=args.refresh)
     monthly_rows, parsed_files = download_and_parse(source_files, refresh=args.refresh)
     trend_rows, trend_source = load_trend_inbound_monthlies(refresh=args.refresh)
+    trend_country_rows = load_trend_inbound_country_monthlies(refresh=args.refresh)
     annual_extras, annual_sources = load_annual_extras(refresh=args.refresh)
     receipt_validations, receipt_sources = load_receipt_annual_validations(refresh=args.refresh)
     monthly_rows = select_best_monthly_rows(monthly_rows + trend_rows)
+    selected_article_ids = {
+        int(row["source_article_id"])
+        for row in monthly_rows
+        if int(row["source_article_id"]) != 900001 and int(row["year"]) >= 2024
+    }
+    workbook_country_rows = download_and_parse_selected_country_rows(source_files, selected_article_ids, refresh=args.refresh)
+    country_rows = select_country_rows_for_monthlies(workbook_country_rows + trend_country_rows, monthly_rows)
     parsed_files.extend([trend_source, *annual_sources, *receipt_sources])
     wb_values = load_world_bank(refresh=args.refresh)
     derived = build_derived(
@@ -1122,11 +1470,14 @@ def main(argv: list[str] | None = None) -> int:
         wb_values,
         annual_extras=annual_extras,
         receipt_validations=receipt_validations,
+        country_rows=country_rows,
     )
 
     write_csv(OUT / "tourism_monthly.csv", derived["monthly"])
     write_csv(OUT / "tourism_quarterly.csv", derived["quarterly"])
     write_csv(OUT / "tourism_annual.csv", derived["annual"])
+    write_csv(OUT / "tourism_country_monthly.csv", derived["country_monthly"])
+    write_csv(OUT / "validation_country_monthly.csv", derived["country_validation"])
     write_csv(OUT / "validation_annual_worldbank.csv", derived["validation"])
     (OUT / "source_files.json").write_text(
         json.dumps([asdict(source) for source in parsed_files], ensure_ascii=False, indent=2),
@@ -1143,6 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ok_years = sorted({row["year"] for row in monthly_rows})
     print(f"Parsed monthly rows: {len(monthly_rows)}")
+    print(f"Parsed country monthly rows: {len(country_rows)}")
     print(f"Years: {ok_years}")
     print(f"Source files found: {len(source_files)}; parsed ok: {sum(1 for f in parsed_files if f.parse_status == 'ok')}")
     for source in parsed_files:

@@ -24,6 +24,7 @@ def main() -> int:
     (OUT_DIR / ".nojekyll").write_text("", encoding="utf-8")
     for filename in [
         "tourism_monthly.csv",
+        "tourism_ytd.csv",
         "tourism_quarterly.csv",
         "tourism_annual.csv",
         "tourism_country_monthly.csv",
@@ -597,7 +598,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <header class="topbar">
       <div>
         <h1><span>Dashboard จำนวนนักท่องเที่ยว</span> <span>ต่างชาติของประเทศไทย</span></h1>
-        <p class="subtitle"><span>ข้อมูลรายเดือน/ไตรมาส/ปี ตั้งแต่ 2555 ถึงล่าสุด</span> <span>จากแหล่งภาครัฐ พร้อมการตรวจซ้ำหลายแหล่ง</span></p>
+        <p class="subtitle"><span>ข้อมูลรายเดือน/YTD/ไตรมาส/ปี ตั้งแต่ 2555 ถึงล่าสุด</span> <span>จากแหล่งภาครัฐ พร้อมการตรวจซ้ำหลายแหล่ง</span></p>
       </div>
       <div class="source-pill" id="freshnessPill">กำลังโหลดข้อมูล</div>
     </header>
@@ -608,6 +609,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="controls">
         <div class="segmented" id="grainButtons">
           <button type="button" data-grain="monthly" class="active">รายเดือน</button>
+          <button type="button" data-grain="ytd">YTD</button>
           <button type="button" data-grain="quarterly">รายไตรมาส</button>
           <button type="button" data-grain="annual">รายปี</button>
         </div>
@@ -697,7 +699,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <section class="panel method">
       <div>
         <h2>แหล่งข้อมูลและวิธีคำนวณ</h2>
-        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนตั้งแต่ปี 2556 ถึง พ.ค. 2569 และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้ ส่วนตัวกรองรายประเทศ/รายทวีปใช้ข้อมูลที่ reconcile กับยอดรวมรายเดือนได้ตั้งแต่ปี 2558 ถึงข้อมูลล่าสุด</p>
+        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนและ YTD ตั้งแต่ปี 2556 ถึง พ.ค. 2569 และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้ ส่วนตัวกรองรายประเทศ/รายทวีปใช้ข้อมูลที่ reconcile กับยอดรวมรายเดือนได้ตั้งแต่ปี 2558 ถึงข้อมูลล่าสุด</p>
         <ul id="sourceList"></ul>
       </div>
       <div>
@@ -705,8 +707,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         <div class="validation-list">
           <div class="validation-badge"><strong>MoM</strong><span>เดือนนี้เทียบเดือนก่อนหน้า ใช้ในรายเดือน</span></div>
           <div class="validation-badge"><strong>QoQ</strong><span>ไตรมาสนี้เทียบไตรมาสก่อนหน้า ใช้ในรายไตรมาส</span></div>
-          <div class="validation-badge"><strong>YoY</strong><span>เทียบช่วงเดียวกันของปีก่อน ใช้รายเดือน รายไตรมาส และรายปี</span></div>
-          <div class="validation-badge"><strong>YTD</strong><span>ปี 2569 เป็นยอด ม.ค.-พ.ค. ยังไม่ใช่ทั้งปี</span></div>
+          <div class="validation-badge"><strong>YoY</strong><span>เทียบช่วงเดียวกันของปีก่อน ใช้รายเดือน YTD รายไตรมาส และรายปี</span></div>
+          <div class="validation-badge"><strong>YTD</strong><span>ยอดสะสม ม.ค.-เดือนที่เลือก และเทียบ YoY กับยอดสะสมถึงเดือนเดียวกันของปีก่อน</span></div>
         </div>
       </div>
     </section>
@@ -888,6 +890,39 @@ HTML_TEMPLATE = r"""<!doctype html>
       return rows;
     }
 
+    function deriveYtdRows(monthlyRows) {
+      const byYear = new Map();
+      monthlyRows.forEach(row => {
+        if (!byYear.has(row.year)) byYear.set(row.year, []);
+        byYear.get(row.year).push(row);
+      });
+      const monthlyLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row.arrivals]));
+      const rows = [];
+      [...byYear.entries()].sort((a, b) => a[0] - b[0]).forEach(([year, yearRows]) => {
+        let cumulative = 0;
+        yearRows.sort((a, b) => a.month - b.month).forEach(row => {
+          cumulative += Number(row.arrivals || 0);
+          const baseMonths = Array.from({ length: row.month }, (_, idx) => idx + 1).map(month => monthlyLookup.get(`${year - 1}-${month}`));
+          const base = baseMonths.every(value => value !== undefined) ? baseMonths.reduce((sum, value) => sum + Number(value), 0) : null;
+          rows.push({
+            year,
+            month: row.month,
+            period: `YTD ${MONTHS_TH[row.month - 1]}`,
+            date: row.date,
+            arrivals: cumulative,
+            months: row.month,
+            yoy_pct: pctChange(cumulative, base),
+            yoy_basis: `YTD same ${row.month} months`,
+            source_published: row.source_published,
+            source_file_url: row.source_file_url,
+            segment_type: state.segmentType,
+            segment_label: selectedSegmentLabel()
+          });
+        });
+      });
+      return rows;
+    }
+
     function deriveAnnualRows(monthlyRows) {
       const byYear = new Map();
       monthlyRows.forEach(row => {
@@ -929,13 +964,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     function currentModel() {
       ensureSegmentDefaults();
       if (state.segmentType === "total") {
-        return { monthly: DATA.monthly, quarterly: DATA.quarterly, annual: DATA.annual };
+        return { monthly: DATA.monthly, ytd: DATA.ytd || deriveYtdRows(DATA.monthly), quarterly: DATA.quarterly, annual: DATA.annual };
       }
       const key = currentSegmentKey();
       if (segmentCache.key === key && segmentCache.model) return segmentCache.model;
       const monthly = aggregateMonthlyRows(matchingCountryRows());
       const model = {
         monthly,
+        ytd: deriveYtdRows(monthly),
         quarterly: deriveQuarterlyRows(monthly),
         annual: deriveAnnualRows(monthly)
       };
@@ -946,6 +982,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function rowsForGrain(grain = state.grain) {
       const model = currentModel();
+      if (grain === "ytd") return model.ytd;
       if (grain === "quarterly") return model.quarterly;
       if (grain === "annual") return model.annual;
       return model.monthly;
@@ -965,7 +1002,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       document.querySelectorAll("#grainButtons button").forEach(button => {
         button.addEventListener("click", () => {
           state.grain = button.dataset.grain;
-          state.growth = state.grain === "annual" ? "yoy" : "both";
+          state.growth = (state.grain === "annual" || state.grain === "ytd") ? "yoy" : "both";
           resetSelection();
           ensureYears();
           render();
@@ -1027,11 +1064,14 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function renderGrowthButtons() {
       const host = document.getElementById("growthButtons");
-      const options = state.grain === "monthly"
+      const options = state.grain === "ytd"
+        ? [["yoy", "YoY"]]
+        : state.grain === "monthly"
         ? [["both", "MoM + YoY"], ["mom", "MoM"], ["yoy", "YoY"]]
         : state.grain === "quarterly"
           ? [["both", "QoQ + YoY"], ["qoq", "QoQ"], ["yoy", "YoY"]]
           : [["yoy", "YoY"]];
+      if (!options.some(([key]) => key === state.growth)) state.growth = options[0][0];
       host.innerHTML = options.map(([key, label]) => `<button type="button" data-growth="${key}" class="${state.growth === key ? "active" : ""}">${label}</button>`).join("");
       host.querySelectorAll("button").forEach(button => {
         button.addEventListener("click", () => {
@@ -1134,13 +1174,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function xDomainForGrain() {
-      if (state.grain === "monthly") return Array.from({ length: 12 }, (_, idx) => idx + 1);
+      if (state.grain === "monthly" || state.grain === "ytd") return Array.from({ length: 12 }, (_, idx) => idx + 1);
       if (state.grain === "quarterly") return [1, 2, 3, 4];
       return uniqueYears(selectedRows());
     }
 
     function xLabel(value) {
-      if (state.grain === "monthly") return MONTHS_TH[value - 1];
+      if (state.grain === "monthly" || state.grain === "ytd") return MONTHS_TH[value - 1];
       if (state.grain === "quarterly") return `Q${value}`;
       return String(be(value));
     }
@@ -1165,7 +1205,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       rows.forEach(row => {
         if (!group.has(row.year)) group.set(row.year, []);
         group.get(row.year).push({
-          x: state.grain === "monthly" ? row.month : row.quarter,
+          x: (state.grain === "monthly" || state.grain === "ytd") ? row.month : row.quarter,
           y: row.arrivals,
           label: shortNumber(row.arrivals),
           row,
@@ -1182,6 +1222,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function growthFields() {
+      if (state.grain === "ytd") return [["yoy_pct", "YoY", ""]];
       if (state.grain === "monthly") {
         if (state.growth === "mom") return [["mom_pct", "MoM", ""]];
         if (state.growth === "yoy") return [["yoy_pct", "YoY", "6 4"]];
@@ -1220,9 +1261,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         fields.forEach(([field, label, dash]) => {
           const values = rows
             .filter(row => row.year === year && row[field] !== null && row[field] !== undefined)
-            .sort((a, b) => (state.grain === "monthly" ? a.month - b.month : a.quarter - b.quarter))
+            .sort((a, b) => ((state.grain === "monthly" || state.grain === "ytd") ? a.month - b.month : a.quarter - b.quarter))
             .map(row => ({
-              x: state.grain === "monthly" ? row.month : row.quarter,
+              x: (state.grain === "monthly" || state.grain === "ytd") ? row.month : row.quarter,
               y: row[field],
               label: pct(row[field]),
               row,
@@ -1237,12 +1278,15 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function periodName(row) {
       if (state.grain === "monthly") return `${MONTHS_TH[row.month - 1]} ${be(row.year)}`;
+      if (state.grain === "ytd") return `YTD ${MONTHS_TH[row.month - 1]} ${be(row.year)}`;
       if (state.grain === "quarterly") return `Q${row.quarter} ${be(row.year)}`;
       return String(be(row.year));
     }
 
     function periodTip(row, label, value) {
-      const growth = state.grain === "monthly"
+      const growth = state.grain === "ytd"
+        ? `YoY ${pct(row.yoy_pct)}`
+        : state.grain === "monthly"
         ? `MoM ${pct(row.mom_pct)} | YoY ${pct(row.yoy_pct)}`
         : `QoQ ${pct(row.qoq_pct)} | YoY ${pct(row.yoy_pct)}`;
       const main = label === "จำนวน" ? `${number(value)} คน` : pct(value);
@@ -1384,13 +1428,16 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
       const row = selected.row;
       const isMonthly = row.month !== undefined;
+      const isYtd = state.grain === "ytd";
       const isQuarterly = row.quarter !== undefined;
-      const periodGrowth = isMonthly
+      const periodGrowth = isYtd
+        ? [["YoY", row.yoy_pct], ["เกณฑ์ YoY", row.yoy_basis || `YTD same ${row.months || row.month} months`]]
+        : isMonthly
         ? [["MoM", row.mom_pct], ["YoY", row.yoy_pct]]
         : isQuarterly
           ? [["QoQ", row.qoq_pct], ["YoY", row.yoy_pct]]
           : [["YoY", row.yoy_pct], ["เกณฑ์ YoY", row.yoy_basis === "full_year" ? "เต็มปี" : (row.yoy_basis || "n/a")]];
-      const status = row.is_full_year === false ? "YTD" : row.annual_only ? "Annual-only" : "ปกติ";
+      const status = isYtd ? `${row.months || row.month} เดือนสะสม` : row.is_full_year === false ? "YTD" : row.annual_only ? "Annual-only" : "ปกติ";
       const segment = row.segment_label || selectedSegmentLabel();
       const source = row.source_file_url ? `<a href="${htmlEscape(row.source_file_url)}">เปิดไฟล์ต้นทาง</a>` : "รวมจากข้อมูลรายเดือน";
       host.innerHTML = `
@@ -1431,14 +1478,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     function renderCharts() {
       state.pointLookup = new Map();
       const rows = selectedRows();
-      const period = state.grain === "monthly" ? "รายเดือน" : state.grain === "quarterly" ? "รายไตรมาส" : "รายปี";
+      const period = state.grain === "monthly" ? "รายเดือน" : state.grain === "ytd" ? "YTD" : state.grain === "quarterly" ? "รายไตรมาส" : "รายปี";
       const segment = selectedSegmentLabel();
       document.getElementById("arrivalsTitle").textContent = `จำนวนผู้เดินทางเข้าไทย (${period}) | ${segment}`;
-      document.getElementById("arrivalsHint").textContent = state.grain === "annual"
+      document.getElementById("arrivalsHint").textContent = state.grain === "ytd"
+        ? "YTD คือยอดสะสมตั้งแต่ ม.ค. ถึงเดือนนั้น หนึ่งเส้นต่อหนึ่งปี"
+        : state.grain === "annual"
         ? "เส้นรายปีแสดงยอดรวมของแต่ละปีในตัวกรองนี้ โดยปี 2569 เป็น YTD ถ้ามีข้อมูลถึงล่าสุด"
         : "หนึ่งเส้นต่อหนึ่งปี สีแยกปีตามตัวกรอง";
       document.getElementById("growthTitle").textContent = `การเติบโต (${growthFields().map(item => item[1]).join(" + ")})`;
-      document.getElementById("growthHint").textContent = state.grain === "annual"
+      document.getElementById("growthHint").textContent = state.grain === "ytd"
+        ? "YTD YoY เทียบยอดสะสมถึงเดือนเดียวกันของปีก่อน"
+        : state.grain === "annual"
         ? "YoY เทียบยอดรวมรายปีกับปีก่อนหน้าของตัวกรองเดียวกัน"
         : "เส้นทึบคือ period-on-period และเส้นประคือ YoY เมื่อเลือกดูพร้อมกัน";
       renderLineChart("arrivalsChart", "arrivalsLegend", buildArrivalSeries(rows), {
@@ -1455,8 +1506,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function renderDetailTable() {
       const rows = selectedRows().slice().sort((a, b) => {
-        const ax = state.grain === "monthly" ? a.month : state.grain === "quarterly" ? a.quarter : 0;
-        const bx = state.grain === "monthly" ? b.month : state.grain === "quarterly" ? b.quarter : 0;
+        const ax = (state.grain === "monthly" || state.grain === "ytd") ? a.month : state.grain === "quarterly" ? a.quarter : 0;
+        const bx = (state.grain === "monthly" || state.grain === "ytd") ? b.month : state.grain === "quarterly" ? b.quarter : 0;
         return b.year - a.year || bx - ax;
       });
       const table = document.getElementById("detailTable");
@@ -1472,6 +1523,17 @@ HTML_TEMPLATE = r"""<!doctype html>
           <td class="${deltaClass(row.mom_pct)}">${pct(row.mom_pct)}</td>
           <td class="${deltaClass(row.yoy_pct)}">${pct(row.yoy_pct)}</td>
           <td>${row.source_published ? row.source_published.slice(0, 10) : ""}</td>
+          <td>${row.source_file_url ? `<a href="${htmlEscape(row.source_file_url)}">MOTS</a>` : "รวม"}</td>
+        </tr>`).join("");
+      } else if (state.grain === "ytd") {
+        header = "<tr><th>ช่วงเวลา</th><th>ปี</th><th>YTD</th><th>เดือนสะสม</th><th>YoY</th><th>เกณฑ์ YoY</th><th>แหล่งไฟล์</th></tr>";
+        body = rows.map(row => `<tr>
+          <td>YTD ${MONTHS_TH[row.month - 1]} ${be(row.year)}</td>
+          <td>${row.year}</td>
+          <td>${number(row.arrivals)}</td>
+          <td>${row.months || row.month}</td>
+          <td class="${deltaClass(row.yoy_pct)}">${pct(row.yoy_pct)}</td>
+          <td>${htmlEscape(row.yoy_basis || `YTD same ${row.months || row.month} months`)}</td>
           <td>${row.source_file_url ? `<a href="${htmlEscape(row.source_file_url)}">MOTS</a>` : "รวม"}</td>
         </tr>`).join("");
       } else if (state.grain === "quarterly") {

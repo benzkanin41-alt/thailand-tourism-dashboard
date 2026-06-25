@@ -1320,6 +1320,35 @@ def build_derived(
         monthly.append({**row, "mom_pct": mom, "yoy_pct": yoy, "month_name": MONTH_EN[month]})
         previous_arrivals = arrivals
 
+    ytd = []
+    for year, rows in sorted(by_year.items()):
+        cumulative = 0
+        for row in sorted(rows, key=lambda r: int(r["month"])):
+            month = int(row["month"])
+            cumulative += int(row["arrivals"])
+            comparison_months = range(1, month + 1)
+            base_values = [by_year_month.get((year - 1, base_month)) for base_month in comparison_months]
+            yoy_base = sum(base_values) if all(value is not None for value in base_values) else None
+            ytd.append(
+                {
+                    "year": year,
+                    "month": month,
+                    "period": f"YTD {MONTH_EN[month]}",
+                    "date": row["date"],
+                    "arrivals": cumulative,
+                    "months": month,
+                    "yoy_pct": pct_change(cumulative, yoy_base),
+                    "yoy_basis": f"YTD same {month} months",
+                    "source_title": row.get("source_title"),
+                    "source_published": row.get("source_published"),
+                    "source_page_url": row.get("source_page_url"),
+                    "source_file_url": row.get("source_file_url"),
+                    "source_local_file": row.get("source_local_file"),
+                    "source_sha256": row.get("source_sha256"),
+                    "parse_note": "derived from monthly arrivals",
+                }
+            )
+
     quarterly = []
     for year, rows in by_year.items():
         months = {int(row["month"]): int(row["arrivals"]) for row in rows}
@@ -1402,6 +1431,7 @@ def build_derived(
 
     return {
         "monthly": monthly,
+        "ytd": ytd,
         "quarterly": quarterly,
         "annual": annual,
         "validation": validation,
@@ -1474,6 +1504,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     write_csv(OUT / "tourism_monthly.csv", derived["monthly"])
+    write_csv(OUT / "tourism_ytd.csv", derived["ytd"])
     write_csv(OUT / "tourism_quarterly.csv", derived["quarterly"])
     write_csv(OUT / "tourism_annual.csv", derived["annual"])
     write_csv(OUT / "tourism_country_monthly.csv", derived["country_monthly"])

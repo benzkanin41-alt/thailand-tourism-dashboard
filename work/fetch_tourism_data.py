@@ -857,6 +857,30 @@ def crawl_mots(refresh: bool = False) -> tuple[list[NewsFile], dict[str, Any]]:
     return source_files, metadata
 
 
+def add_required_source_fallbacks(source_files: list[NewsFile]) -> list[NewsFile]:
+    """Keep official monthly workbooks that are still downloadable but missing from a live listing."""
+    existing_ids = {source.article_id for source in source_files}
+    fallbacks = []
+    if 13676 not in existing_ids:
+        fallbacks.append(
+            NewsFile(
+                year=2025,
+                category_id=806,
+                article_id=13676,
+                article_nid=0,
+                title=(
+                    "สถิตินักท่องเที่ยวชาวต่างชาติที่เดินทางเข้าประเทศไทย ม.ค. - ธ.ค. ปี 2568 "
+                    "(เบื้องต้น) (International Tourist Arrivals to Thailand Jan - Dec 2025P)"
+                ),
+                published="2026-01-06T09:43:49.402Z",
+                link_download="https://www.mots.go.th/images/v2022_875a5789-3bcc-4700-bf55-b86fa7f1053c.xlsx",
+                page_url="https://www.mots.go.th/news/category/806",
+                file_url="https://www.mots.go.th/images/v2022_875a5789-3bcc-4700-bf55-b86fa7f1053c.xlsx",
+            )
+        )
+    return [*source_files, *fallbacks]
+
+
 def is_arrivals_category(name: str) -> bool:
     normalized = name.lower()
     excluded = [
@@ -1480,6 +1504,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_dirs()
     source_files, metadata = crawl_mots(refresh=args.refresh)
+    source_files = add_required_source_fallbacks(source_files)
     monthly_rows, parsed_files = download_and_parse(source_files, refresh=args.refresh)
     trend_rows, trend_source = load_trend_inbound_monthlies(refresh=args.refresh)
     trend_country_rows = load_trend_inbound_country_monthlies(refresh=args.refresh)

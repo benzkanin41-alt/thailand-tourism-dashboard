@@ -699,7 +699,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <section class="panel method">
       <div>
         <h2>แหล่งข้อมูลและวิธีคำนวณ</h2>
-        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนและ YTD ตั้งแต่ปี 2556 ถึง พ.ค. 2569 และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้ ส่วนตัวกรองรายประเทศ/รายทวีปใช้ข้อมูลที่ reconcile กับยอดรวมรายเดือนได้ตั้งแต่ปี 2558 ถึงข้อมูลล่าสุด</p>
+        <p>ตัวเลขหลักคือจำนวนนักท่องเที่ยวต่างชาติที่เดินทางเข้าประเทศไทย หน่วยเป็นคน รายเดือนและ YTD ตั้งแต่ปี 2556 ถึงข้อมูลล่าสุด และรายปีเริ่มปี 2555 โดยปี 2555 เป็น annual-only เพราะไม่พบไฟล์ภาครัฐที่ให้ monthly split ที่เชื่อถือได้จากชุดที่ตรวจสอบในรอบนี้ ส่วนตัวกรองรายประเทศ/รายทวีปใช้ข้อมูลที่ reconcile กับยอดรวมรายเดือนได้ตั้งแต่ปี 2558 ถึงข้อมูลล่าสุด</p>
         <ul id="sourceList"></ul>
       </div>
       <div>
@@ -830,12 +830,20 @@ HTML_TEMPLATE = r"""<!doctype html>
             arrivals: 0,
             source_published: row.source_published,
             source_file_url: row.source_file_url,
+            source_yoy_base_arrivals: null,
+            missing_reporting_days: row.missing_reporting_days,
+            data_quality_note: row.data_quality_note,
             segment_type: state.segmentType,
             segment_label: selectedSegmentLabel()
           });
         }
         const target = grouped.get(key);
         target.arrivals += Number(row.arrivals || 0);
+        if (row.source_yoy_base_arrivals !== null && row.source_yoy_base_arrivals !== undefined) {
+          target.source_yoy_base_arrivals = Number(target.source_yoy_base_arrivals || 0) + Number(row.source_yoy_base_arrivals);
+        }
+        if (!target.data_quality_note && row.data_quality_note) target.data_quality_note = row.data_quality_note;
+        if (!target.missing_reporting_days && row.missing_reporting_days) target.missing_reporting_days = row.missing_reporting_days;
         if (!target.source_file_url && row.source_file_url) target.source_file_url = row.source_file_url;
         if (!target.source_published && row.source_published) target.source_published = row.source_published;
       });
@@ -843,10 +851,15 @@ HTML_TEMPLATE = r"""<!doctype html>
       const lookup = new Map(sorted.map(row => [`${row.year}-${row.month}`, row.arrivals]));
       let previous = null;
       return sorted.map(row => {
+        const historicalBase = lookup.get(`${row.year - 1}-${row.month}`);
+        const yoyBase = row.source_yoy_base_arrivals ?? historicalBase;
+        const yoyAdjusted = row.source_yoy_base_arrivals !== null && row.source_yoy_base_arrivals !== undefined && row.source_yoy_base_arrivals !== historicalBase;
         const out = {
           ...row,
           mom_pct: pctChange(row.arrivals, previous),
-          yoy_pct: pctChange(row.arrivals, lookup.get(`${row.year - 1}-${row.month}`)),
+          yoy_pct: pctChange(row.arrivals, yoyBase),
+          yoy_base_arrivals: yoyBase,
+          yoy_basis: yoyAdjusted ? "MOTS same-coverage comparison" : "same month previous year",
           month_name: MONTHS_TH[row.month - 1]
         };
         previous = row.arrivals;
@@ -866,12 +879,27 @@ HTML_TEMPLATE = r"""<!doctype html>
           const months = [(quarter - 1) * 3 + 1, (quarter - 1) * 3 + 2, (quarter - 1) * 3 + 3];
           if (!months.every(month => monthMap.has(month))) continue;
           const monthRows = months.map(month => monthMap.get(month));
+          const priorMonthMap = byYear.get(year - 1);
+          const yoyBaseValues = months.map((month, idx) => monthRows[idx].source_yoy_base_arrivals ?? priorMonthMap?.get(month)?.arrivals);
+          const yoyBase = yoyBaseValues.every(value => value !== undefined && value !== null)
+            ? yoyBaseValues.reduce((sum, value) => sum + Number(value), 0)
+            : null;
+          const yoyAdjusted = months.some((month, idx) => {
+            const sourceBase = monthRows[idx].source_yoy_base_arrivals;
+            const historicalBase = priorMonthMap?.get(month)?.arrivals;
+            return sourceBase !== undefined && sourceBase !== null && sourceBase !== historicalBase;
+          });
+          const qualityNotes = [...new Set(monthRows.map(row => row.data_quality_note).filter(Boolean))];
           rows.push({
             year,
             quarter,
             period: `Q${quarter}`,
             date: `${year}-${String(months[0]).padStart(2, "0")}-01`,
             arrivals: monthRows.reduce((sum, row) => sum + Number(row.arrivals || 0), 0),
+            yoy_base_arrivals: yoyBase,
+            yoy_basis: yoyAdjusted ? "MOTS same-coverage quarter comparison" : "same quarter previous year",
+            missing_reporting_days: Math.max(...monthRows.map(row => Number(row.missing_reporting_days || 0))),
+            data_quality_note: qualityNotes.join(" | ") || null,
             source_published: monthRows[monthRows.length - 1].source_published,
             source_file_url: monthRows[monthRows.length - 1].source_file_url,
             segment_type: state.segmentType,
@@ -884,7 +912,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       let previous = null;
       rows.forEach(row => {
         row.qoq_pct = pctChange(row.arrivals, previous);
-        row.yoy_pct = pctChange(row.arrivals, lookup.get(`${row.year - 1}-${row.quarter}`));
+        row.yoy_pct = pctChange(row.arrivals, row.yoy_base_arrivals ?? lookup.get(`${row.year - 1}-${row.quarter}`));
         previous = row.arrivals;
       });
       return rows;
@@ -897,12 +925,22 @@ HTML_TEMPLATE = r"""<!doctype html>
         byYear.get(row.year).push(row);
       });
       const monthlyLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row.arrivals]));
+      const monthlyRowLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row]));
       const rows = [];
       [...byYear.entries()].sort((a, b) => a[0] - b[0]).forEach(([year, yearRows]) => {
         let cumulative = 0;
         yearRows.sort((a, b) => a.month - b.month).forEach(row => {
           cumulative += Number(row.arrivals || 0);
-          const baseMonths = Array.from({ length: row.month }, (_, idx) => idx + 1).map(month => monthlyLookup.get(`${year - 1}-${month}`));
+          const baseMonths = Array.from({ length: row.month }, (_, idx) => idx + 1).map(month => {
+            const currentRow = monthlyRowLookup.get(`${year}-${month}`);
+            return currentRow?.source_yoy_base_arrivals ?? monthlyLookup.get(`${year - 1}-${month}`);
+          });
+          const yoyAdjusted = Array.from({ length: row.month }, (_, idx) => idx + 1).some(month => {
+            const currentRow = monthlyRowLookup.get(`${year}-${month}`);
+            const sourceBase = currentRow?.source_yoy_base_arrivals;
+            const historicalBase = monthlyLookup.get(`${year - 1}-${month}`);
+            return sourceBase !== undefined && sourceBase !== null && sourceBase !== historicalBase;
+          });
           const base = baseMonths.every(value => value !== undefined) ? baseMonths.reduce((sum, value) => sum + Number(value), 0) : null;
           rows.push({
             year,
@@ -912,7 +950,10 @@ HTML_TEMPLATE = r"""<!doctype html>
             arrivals: cumulative,
             months: row.month,
             yoy_pct: pctChange(cumulative, base),
-            yoy_basis: `YTD same ${row.month} months`,
+            yoy_base_arrivals: base,
+            yoy_basis: yoyAdjusted ? "MOTS same-coverage YTD comparison" : `YTD same ${row.month} months`,
+            missing_reporting_days: row.missing_reporting_days,
+            data_quality_note: row.data_quality_note,
             source_published: row.source_published,
             source_file_url: row.source_file_url,
             segment_type: state.segmentType,
@@ -941,21 +982,34 @@ HTML_TEMPLATE = r"""<!doctype html>
           annual_only: false,
           source_published: latestSource.source_published,
           source_file_url: latestSource.source_file_url,
+          missing_reporting_days: latestSource.missing_reporting_days,
+          data_quality_note: latestSource.data_quality_note,
           segment_type: state.segmentType,
           segment_label: selectedSegmentLabel()
         };
       }).sort((a, b) => a.year - b.year);
       const monthlyLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row.arrivals]));
+      const monthlyRowLookup = new Map(monthlyRows.map(row => [`${row.year}-${row.month}`, row]));
       const annualLookup = new Map(rows.map(row => [row.year, row.arrivals]));
       rows.forEach(row => {
         if (row.months === 12) {
           row.yoy_basis = "full_year";
           row.yoy_pct = pctChange(row.arrivals, annualLookup.get(row.year - 1));
         } else {
-          const baseMonths = Array.from({ length: row.months }, (_, idx) => idx + 1).map(month => monthlyLookup.get(`${row.year - 1}-${month}`));
+          const baseMonths = Array.from({ length: row.months }, (_, idx) => idx + 1).map(month => {
+            const currentRow = monthlyRowLookup.get(`${row.year}-${month}`);
+            return currentRow?.source_yoy_base_arrivals ?? monthlyLookup.get(`${row.year - 1}-${month}`);
+          });
+          const yoyAdjusted = Array.from({ length: row.months }, (_, idx) => idx + 1).some(month => {
+            const currentRow = monthlyRowLookup.get(`${row.year}-${month}`);
+            const sourceBase = currentRow?.source_yoy_base_arrivals;
+            const historicalBase = monthlyLookup.get(`${row.year - 1}-${month}`);
+            return sourceBase !== undefined && sourceBase !== null && sourceBase !== historicalBase;
+          });
           const base = baseMonths.every(value => value !== undefined) ? baseMonths.reduce((sum, value) => sum + Number(value), 0) : null;
-          row.yoy_basis = `YTD same ${row.months} months`;
+          row.yoy_basis = yoyAdjusted ? "MOTS same-coverage YTD comparison" : `YTD same ${row.months} months`;
           row.yoy_pct = pctChange(row.arrivals, base);
+          row.yoy_base_arrivals = base;
         }
       });
       return rows;
@@ -1124,9 +1178,11 @@ HTML_TEMPLATE = r"""<!doctype html>
       }
       const currentYtdYear = latestMonth.year;
       const ytdMonths = latestMonth.month;
-      const currentYtd = model.monthly.filter(row => row.year === currentYtdYear && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
-      const previousYtd = model.monthly.filter(row => row.year === currentYtdYear - 1 && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
-      const ytdYoY = previousYtd ? ((currentYtd - previousYtd) / previousYtd) * 100 : null;
+      const latestYtd = (model.ytd || []).find(row => row.year === currentYtdYear && row.month === ytdMonths);
+      const currentYtd = latestYtd?.arrivals ?? model.monthly.filter(row => row.year === currentYtdYear && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
+      const previousYtd = latestYtd?.yoy_base_arrivals ?? model.monthly.filter(row => row.year === currentYtdYear - 1 && row.month <= ytdMonths).reduce((sum, row) => sum + row.arrivals, 0);
+      const ytdYoY = latestYtd?.yoy_pct ?? (previousYtd ? ((currentYtd - previousYtd) / previousYtd) * 100 : null);
+      const latestQualityNote = latestMonth.data_quality_note || latestYtd?.data_quality_note || "";
       const fullYears = model.annual.filter(row => row.is_full_year && row.months === 12);
       const latestFull = fullYears[fullYears.length - 1];
       const peak = fullYears.length ? fullYears.reduce((best, row) => row.arrivals > best.arrivals ? row : best, fullYears[0]) : null;
@@ -1134,7 +1190,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         {
           label: `เดือนล่าสุด ${dateText(latestMonth.date)} | ${selectedSegmentLabel()}`,
           value: shortNumber(latestMonth.arrivals),
-          note: `${number(latestMonth.arrivals)} คน`,
+          note: `${number(latestMonth.arrivals)} คน${latestQualityNote ? " | มีหมายเหตุคุณภาพข้อมูล" : ""}`,
           delta: `YoY ${pct(latestMonth.yoy_pct)}`,
           deltaValue: latestMonth.yoy_pct
         },
@@ -1170,7 +1226,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <div class="delta ${deltaClass(card.deltaValue)}">${card.delta}</div>
         </article>
       `).join("");
-      document.getElementById("freshnessPill").textContent = `ข้อมูลล่าสุด: ${dateText(latestMonth.date)} | ${selectedSegmentLabel()} | build __BUILD_DATE__`;
+      document.getElementById("freshnessPill").textContent = `ข้อมูลล่าสุด: ${dateText(latestMonth.date)} | ${selectedSegmentLabel()} | build __BUILD_DATE__${latestQualityNote ? ` | ขาดข้อมูล ${latestMonth.missing_reporting_days || 4} วัน` : ""}`;
     }
 
     function xDomainForGrain() {
@@ -1599,6 +1655,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <li><a href="${htmlEscape(meta.data_go_package_api)}">data.go.th: ${htmlEscape(meta.data_go_result.title)}</a> metadata modified ${htmlEscape((meta.data_go_result.metadata_modified || "").slice(0, 10))}; resource ชี้ไปหน้า MOTS category 411</li>
         <li><a href="${htmlEscape(meta.trend_inbound_package_api)}">data.go.th: ${htmlEscape(meta.trend_inbound_result.title)}</a> metadata modified ${htmlEscape((meta.trend_inbound_result.metadata_modified || "").slice(0, 10))}; CSV resource updated ${htmlEscape(trendResource.resource_last_updated_date || (trendResource.last_modified || "").slice(0, 10))}</li>
         <li><a href="${htmlEscape(latest.source_file_url)}">MOTS latest workbook</a> เผยแพร่ ${htmlEscape((latest.source_published || "").slice(0, 10))} ครอบคลุมถึง ${dateText(latest.date)}</li>
+        ${latest.data_quality_note ? `<li><strong>หมายเหตุคุณภาพข้อมูลล่าสุด:</strong> ${htmlEscape(latest.data_quality_note)}; ค่า YoY ใช้ฐานเปรียบเทียบช่วงวันเท่ากันจากไฟล์ MOTS</li>` : ""}
         <li>ตัวกรองรายประเทศ/รายทวีปใช้ country-level CSV จาก data.go.th/MOTS ร่วมกับ workbook รายเดือนล่าสุดของ MOTS ครอบคลุม ${countryYears.length ? be(countryYears[0]) + "-" + be(countryYears[countryYears.length - 1]) : "n/a"}; ไฟล์ประเทศปี 2556-2557 ที่ตรวจพบถูกกันออกจาก filter เพราะยอดประเทศรวมแล้วไม่ตรงกับ Grand Total</li>
         <li><a href="${htmlEscape(meta.world_bank_api)}">World Bank ST.INT.ARVL API</a> ใช้ตรวจยอดรายปี 2555-2562 โดยต่างกันเพียงระดับ rounding ของ annual arrivals</li>
       `;

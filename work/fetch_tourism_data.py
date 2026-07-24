@@ -333,7 +333,19 @@ def parse_month(value: Any) -> int | None:
         return None
     if "ytd" in label or "total" in label or "รวม" in label:
         return None
-    return MONTH_MAP.get(label)
+    month = MONTH_MAP.get(label)
+    if month is not None:
+        return month
+
+    # MOTS sometimes appends a numeric data-quality note to a month header,
+    # for example "Jun (-4)" when four reporting days are unavailable.
+    for month_label, month_number in sorted(
+        MONTH_MAP.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        suffix = label.removeprefix(month_label)
+        if suffix != label and suffix.isdigit():
+            return month_number
+    return None
 
 
 def parse_year(value: Any) -> int | None:
@@ -607,6 +619,48 @@ def extract_year_blocks_from_grand_total_table(path: Path) -> tuple[dict[int, di
             return parsed, note
     return None
 
+
+def extract_month_header_metadata(path: Path) -> dict[tuple[int, int], dict[str, Any]]:
+    metadata: dict[tuple[int, int], dict[str, Any]] = {}
+    for _, rows in iter_sheet_rows(path):
+        total_row = find_total_row(rows)
+        if total_row is None:
+            continue
+        header_row = choose_header_row(rows, total_row)
+        if header_row is None or header_row == 0:
+            continue
+        month_header = rows[header_row]
+        year_header = rows[header_row - 1]
+        footnote = ""
+        for footer_row in rows[total_row + 1 :]:
+            for value in footer_row:
+                footer_text = clean_country_label(value)
+                if footer_text.startswith("**"):
+                    footnote = footer_text.lstrip("* ").strip()
+                    break
+            if footnote:
+                break
+        year_starts = [
+            (col, parse_year(value))
+            for col, value in enumerate(year_header)
+            if parse_year(value) is not None
+        ]
+        for i, (start_col, year) in enumerate(year_starts):
+            assert year is not None
+            end_col = year_starts[i + 1][0] if i + 1 < len(year_starts) else len(month_header)
+            for col in range(start_col, end_col):
+                header_text = value_to_text(month_header[col] if col < len(month_header) else None)
+                month = parse_month(header_text)
+                missing_match = re.search(r"\(\s*-(\d+)\s*\)", header_text)
+                if month is None or missing_match is None:
+                    continue
+                missing_days = int(missing_match.group(1))
+                note = footnote or f"{missing_days} reporting days are unavailable"
+                metadata[(year, month)] = {
+                    "missing_reporting_days": missing_days,
+                    "data_quality_note": f"{header_text}: {note}",
+                }
+    return metadata
 
 def extract_workbook_monthlies(path: Path, default_year: int) -> tuple[dict[int, dict[int, int]], str]:
     year_blocks = extract_year_blocks_from_grand_total_table(path)
@@ -918,6 +972,7 @@ def download_and_parse(files: list[NewsFile], refresh: bool = False) -> tuple[li
             source.sha256 = hashlib.sha256(content).hexdigest()
             source.bytes = len(content)
             parsed_by_year, note = extract_workbook_monthlies(local, source.year)
+            period_metadata = extract_month_header_metadata(local)
             source.parse_status = "ok"
             source.parse_note = note
             source.parsed_years = sorted(parsed_by_year)
@@ -940,6 +995,8 @@ def download_and_parse(files: list[NewsFile], refresh: bool = False) -> tuple[li
                             "source_local_file": source.local_path,
                             "source_sha256": source.sha256,
                             "parse_note": note,
+                            "source_yoy_base_arrivals": parsed_by_year.get(parsed_year - 1, {}).get(month),
+                            **period_metadata.get((parsed_year, month), {}),
                         }
                     )
         except Exception as exc:  # noqa: BLE001 - record parse failures for audit.
@@ -1016,6 +1073,11 @@ def download_and_parse_selected_country_rows(
             if country_parse is None:
                 continue
             parsed_country_rows, country_note = country_parse
+            period_metadata = extract_month_header_metadata(local)
+            country_lookup = {
+                (int(row["year"]), int(row["month"]), str(row["country"])): int(row["arrivals"])
+                for row in parsed_country_rows
+            }
             counts_by_year = {
                 year: len({row["month"] for row in parsed_country_rows if row["year"] == year})
                 for year in {row["year"] for row in parsed_country_rows}
@@ -1035,6 +1097,10 @@ def download_and_parse_selected_country_rows(
                         "source_local_file": local_path,
                         "source_sha256": source_sha,
                         "parse_note": country_note,
+                        "source_yoy_base_arrivals": country_lookup.get(
+                            (int(row["year"]) - 1, int(row["month"]), str(row["country"]))
+                        ),
+                        **period_metadata.get((int(row["year"]), int(row["month"])), {}),
                     }
                 )
         except Exception:
@@ -1324,6 +1390,9 @@ def build_derived(
             "source_article_id": row.get("source_article_id"),
             "source_published": row.get("source_published"),
             "source_file_url": row.get("source_file_url"),
+            "source_yoy_base_arrivals": row.get("source_yoy_base_arrivals"),
+            "missing_reporting_days": row.get("missing_reporting_days"),
+            "data_quality_note": row.get("data_quality_note"),
         }
         for row in (country_rows or [])
     ]
@@ -1334,14 +1403,42 @@ def build_derived(
     monthly = []
     previous_arrivals: int | None = None
     by_year_month = {(int(r["year"]), int(r["month"])): int(r["arrivals"]) for r in monthly_rows}
+    row_by_year_month = {(int(r["year"]), int(r["month"])): r for r in monthly_rows}
+
+    def comparison_base(year: int, months: Any) -> tuple[int | None, bool]:
+        values: list[int] = []
+        adjusted = False
+        for month in months:
+            historical_base = by_year_month.get((year - 1, month))
+            current_row = row_by_year_month.get((year, month), {})
+            source_base = current_row.get("source_yoy_base_arrivals")
+            if source_base is not None:
+                value = int(source_base)
+                adjusted = adjusted or historical_base != value
+            else:
+                value = historical_base
+            if value is None:
+                return None, adjusted
+            values.append(value)
+        return sum(values), adjusted
+
     for row in sorted(monthly_rows, key=lambda r: (r["year"], r["month"])):
         year = int(row["year"])
         month = int(row["month"])
         arrivals = int(row["arrivals"])
-        yoy_base = by_year_month.get((year - 1, month))
+        yoy_base, yoy_adjusted = comparison_base(year, [month])
         mom = pct_change(arrivals, previous_arrivals)
         yoy = pct_change(arrivals, yoy_base)
-        monthly.append({**row, "mom_pct": mom, "yoy_pct": yoy, "month_name": MONTH_EN[month]})
+        monthly.append(
+            {
+                **row,
+                "mom_pct": mom,
+                "yoy_pct": yoy,
+                "yoy_base_arrivals": yoy_base,
+                "yoy_basis": "MOTS same-coverage comparison" if yoy_adjusted else "same month previous year",
+                "month_name": MONTH_EN[month],
+            }
+        )
         previous_arrivals = arrivals
 
     ytd = []
@@ -1351,8 +1448,7 @@ def build_derived(
             month = int(row["month"])
             cumulative += int(row["arrivals"])
             comparison_months = range(1, month + 1)
-            base_values = [by_year_month.get((year - 1, base_month)) for base_month in comparison_months]
-            yoy_base = sum(base_values) if all(value is not None for value in base_values) else None
+            yoy_base, yoy_adjusted = comparison_base(year, comparison_months)
             ytd.append(
                 {
                     "year": year,
@@ -1362,7 +1458,13 @@ def build_derived(
                     "arrivals": cumulative,
                     "months": month,
                     "yoy_pct": pct_change(cumulative, yoy_base),
-                    "yoy_basis": f"YTD same {month} months",
+                    "yoy_base_arrivals": yoy_base,
+                    "yoy_basis": (
+                        "MOTS same-coverage YTD comparison"
+                        if yoy_adjusted
+                        else f"YTD same {month} months"
+                    ),
+                    "data_quality_note": row.get("data_quality_note"),
                     "source_title": row.get("source_title"),
                     "source_published": row.get("source_published"),
                     "source_page_url": row.get("source_page_url"),
@@ -1380,6 +1482,11 @@ def build_derived(
             q_months = [(quarter - 1) * 3 + m for m in range(1, 4)]
             if all(month in months for month in q_months):
                 total = sum(months[month] for month in q_months)
+                quality_notes = [
+                    str(row["data_quality_note"])
+                    for row in rows
+                    if int(row["month"]) in q_months and row.get("data_quality_note")
+                ]
                 quarterly.append(
                     {
                         "year": year,
@@ -1387,14 +1494,22 @@ def build_derived(
                         "period": f"Q{quarter}",
                         "date": f"{year}-{q_months[0]:02d}-01",
                         "arrivals": total,
+                        "data_quality_note": " | ".join(quality_notes) if quality_notes else None,
                     }
                 )
-    q_lookup = {(row["year"], row["quarter"]): row["arrivals"] for row in quarterly}
     quarterly = sorted(quarterly, key=lambda r: (r["year"], r["quarter"]))
     previous_q: int | None = None
     for row in quarterly:
         row["qoq_pct"] = pct_change(row["arrivals"], previous_q)
-        row["yoy_pct"] = pct_change(row["arrivals"], q_lookup.get((row["year"] - 1, row["quarter"])))
+        q_months = range((row["quarter"] - 1) * 3 + 1, row["quarter"] * 3 + 1)
+        yoy_base, yoy_adjusted = comparison_base(row["year"], q_months)
+        row["yoy_pct"] = pct_change(row["arrivals"], yoy_base)
+        row["yoy_base_arrivals"] = yoy_base
+        row["yoy_basis"] = (
+            "MOTS same-coverage quarter comparison"
+            if yoy_adjusted
+            else "same quarter previous year"
+        )
         previous_q = row["arrivals"]
 
     annual = []
@@ -1410,6 +1525,10 @@ def build_derived(
                 "is_full_year": month_count == 12,
                 "annual_only": False,
                 "world_bank_arrivals": wb_values.get(year),
+                "data_quality_note": next(
+                    (row.get("data_quality_note") for row in reversed(rows) if row.get("data_quality_note")),
+                    None,
+                ),
             }
         )
     existing_annual_years = {row["year"] for row in annual}
@@ -1422,13 +1541,17 @@ def build_derived(
     for row in annual:
         if row["months"] not in (0, 12):
             comparison_months = range(1, int(row["months"]) + 1)
-            base_values = [by_year_month.get((row["year"] - 1, month)) for month in comparison_months]
-            yoy_base = sum(base_values) if all(value is not None for value in base_values) else None
-            row["yoy_basis"] = f"YTD same {row['months']} months"
+            yoy_base, yoy_adjusted = comparison_base(row["year"], comparison_months)
+            row["yoy_basis"] = (
+                "MOTS same-coverage YTD comparison"
+                if yoy_adjusted
+                else f"YTD same {row['months']} months"
+            )
         else:
             yoy_base = annual_lookup.get(row["year"] - 1)
             row["yoy_basis"] = "full_year"
         row["yoy_pct"] = pct_change(row["arrivals"], yoy_base)
+        row["yoy_base_arrivals"] = yoy_base
         wb_value = row.get("world_bank_arrivals")
         row["world_bank_diff"] = None if wb_value is None else row["arrivals"] - wb_value
         row["world_bank_diff_pct"] = None if wb_value in (None, 0) else (row["arrivals"] / wb_value - 1) * 100
@@ -1491,8 +1614,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
         return
+    fieldnames: list[str] = []
+    for row in rows:
+        for field in row:
+            if field not in fieldnames:
+                fieldnames.append(field)
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

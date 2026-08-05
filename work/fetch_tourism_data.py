@@ -1008,22 +1008,41 @@ def download_and_parse(files: list[NewsFile], refresh: bool = False) -> tuple[li
     return monthly_rows, parsed_files
 
 
-def select_best_monthly_rows(monthly_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Keep the best source per year and month. The best file has the largest
-    # number of months for its year, then newest publication date.
-    source_scores: dict[tuple[int, int], tuple[int, datetime, int]] = {}
+def select_best_monthly_rows(
+    monthly_rows: list[dict[str, Any]],
+    sources: list[NewsFile] | None = None,
+) -> list[dict[str, Any]]:
+    # Keep the best source per year. Coverage remains the primary criterion.
+    # When coverage ties, prefer a workbook published for that year so an
+    # adjusted YoY comparison block cannot replace the historical full month.
+    source_by_article = {int(source.article_id): source for source in (sources or [])}
+    source_scores: dict[tuple[int, int], tuple[int, int, datetime, int]] = {}
     for row in monthly_rows:
-        key = (int(row["year"]), int(row["source_article_id"]))
+        year = int(row["year"])
+        article_id = int(row["source_article_id"])
+        key = (year, article_id)
+        source = source_by_article.get(article_id)
+        is_primary_year = int(
+            source is None
+            or source.year == year
+            or source.category_id == 585
+        )
         source_scores.setdefault(
             key,
             (
                 int(row["source_year_month_count"]),
+                is_primary_year,
                 parse_datetime(str(row["source_published"])),
                 0,
             ),
         )
         score = source_scores[key]
-        source_scores[key] = (score[0], score[1], score[2] + int(row["arrivals"]))
+        source_scores[key] = (
+            score[0],
+            score[1],
+            score[2],
+            score[3] + int(row["arrivals"]),
+        )
 
     best_source_by_year: dict[int, int] = {}
     for (year, article_id), score in source_scores.items():
@@ -1638,7 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
     trend_country_rows = load_trend_inbound_country_monthlies(refresh=args.refresh)
     annual_extras, annual_sources = load_annual_extras(refresh=args.refresh)
     receipt_validations, receipt_sources = load_receipt_annual_validations(refresh=args.refresh)
-    monthly_rows = select_best_monthly_rows(monthly_rows + trend_rows)
+    monthly_rows = select_best_monthly_rows(monthly_rows + trend_rows, source_files)
     selected_article_ids = {
         int(row["source_article_id"])
         for row in monthly_rows

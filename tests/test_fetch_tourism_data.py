@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from work.fetch_tourism_data import NewsFile, select_best_monthly_rows
+from work.fetch_tourism_data import NewsFile, add_required_source_fallbacks, select_best_monthly_rows
 
 
 def make_source(year: int, category_id: int, article_id: int, published: str) -> NewsFile:
@@ -72,6 +72,26 @@ class SelectBestMonthlyRowsTests(unittest.TestCase):
         self.assertEqual(100, by_period[(2025, 6)]["source_article_id"])
         self.assertEqual(200, by_period[(2026, 6)]["source_article_id"])
         self.assertEqual(800, by_period[(2026, 6)]["source_yoy_base_arrivals"])
+
+
+class RequiredSourceFallbackTests(unittest.TestCase):
+    def test_adds_missing_official_2014_workbook(self) -> None:
+        sources = add_required_source_fallbacks([])
+        by_article = {source.article_id: source for source in sources}
+
+        self.assertIn(1891, by_article)
+        self.assertEqual(2014, by_article[1891].year)
+        self.assertEqual(476, by_article[1891].category_id)
+        self.assertEqual(
+            "https://www.mots.go.th/download/article/article_20171206120212.xlsx",
+            by_article[1891].file_url,
+        )
+
+    def test_does_not_duplicate_existing_2014_workbook(self) -> None:
+        existing = make_source(2014, 476, 1891, "2017-12-06T00:00:00.000Z")
+        sources = add_required_source_fallbacks([existing])
+
+        self.assertEqual(1, sum(source.article_id == 1891 for source in sources))
 
 
 if __name__ == "__main__":

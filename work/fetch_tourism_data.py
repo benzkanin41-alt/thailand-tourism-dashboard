@@ -915,6 +915,23 @@ def add_required_source_fallbacks(source_files: list[NewsFile]) -> list[NewsFile
     """Keep official monthly workbooks that are still downloadable but missing from a live listing."""
     existing_ids = {source.article_id for source in source_files}
     fallbacks = []
+    if 1891 not in existing_ids:
+        fallbacks.append(
+            NewsFile(
+                year=2014,
+                category_id=476,
+                article_id=1891,
+                article_nid=0,
+                title=(
+                    "สถิตินักท่องเที่ยวชาวต่างชาติที่เดินทางเข้าประเทศไทย "
+                    "(International Tourist Arrivals to Thailand)"
+                ),
+                published="2017-12-06T00:00:00.000Z",
+                link_download="https://www.mots.go.th/download/article/article_20171206120212.xlsx",
+                page_url="https://www.mots.go.th/news/category/476",
+                file_url="https://www.mots.go.th/download/article/article_20171206120212.xlsx",
+            )
+        )
     if 13676 not in existing_ids:
         fallbacks.append(
             NewsFile(

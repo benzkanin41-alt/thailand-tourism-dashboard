@@ -474,6 +474,101 @@ HTML_TEMPLATE = r"""<!doctype html>
       margin-top: 10px;
     }
 
+    .country-detail[hidden] {
+      display: none;
+    }
+
+    .country-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px 18px;
+      padding: 16px 18px;
+      border-top: 1px solid #eef2f7;
+      border-bottom: 1px solid #eef2f7;
+    }
+
+    .country-metric {
+      min-width: 0;
+    }
+
+    .country-metric-label {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .country-metric-value {
+      margin-top: 3px;
+      color: var(--ink);
+      font-size: 22px;
+      font-weight: 750;
+      line-height: 1.1;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .country-metric-note {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .country-metric-note.positive { color: #067647; }
+    .country-metric-note.negative { color: #a11043; }
+
+    .country-section {
+      padding: 14px 0 0;
+    }
+
+    .country-section + .country-section {
+      margin-top: 14px;
+      border-top: 1px solid #eef2f7;
+    }
+
+    .country-section-head {
+      padding: 0 18px 10px;
+    }
+
+    .country-section h3 {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .country-section .hint {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .country-table-wrap {
+      max-height: 310px;
+    }
+
+    .country-rank-button {
+      min-height: 0;
+      padding: 0;
+      border-radius: 0;
+      color: #175cd3;
+      font-weight: 650;
+      line-height: 1.35;
+      text-align: left;
+      white-space: normal;
+    }
+
+    .country-rank-button:hover,
+    .country-rank-button:focus-visible {
+      text-decoration: underline;
+    }
+
+    .country-rank-current td {
+      background: #eff6ff;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -582,6 +677,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       .subtitle span { display: block; }
       .topbar, .toolbar { grid-template-columns: 1fr; }
       .cards { grid-template-columns: 1fr; }
+      .country-summary { grid-template-columns: 1fr; }
       .controls { align-items: stretch; }
       .segmented, .quick-actions { width: 100%; overflow-x: auto; }
       .select-group, .select-group select { width: 100%; }
@@ -645,9 +741,37 @@ HTML_TEMPLATE = r"""<!doctype html>
           </div>
           <div class="chart" id="arrivalsChart"></div>
           <div class="legend" id="arrivalsLegend"></div>
-        </article>
+         </article>
 
-        <article class="panel">
+         <article class="panel country-detail" id="countryDetailPanel" hidden>
+           <div class="panel-head">
+             <div>
+               <h2>รายละเอียดรายประเทศ</h2>
+               <div class="hint" id="countryDetailHint"></div>
+             </div>
+           </div>
+           <div class="country-summary" id="countrySummary"></div>
+           <section class="country-section">
+             <div class="country-section-head">
+               <h3>ประเทศยอดนิยมเดือนล่าสุด</h3>
+               <div class="hint">กดชื่อประเทศเพื่อเปลี่ยนรายละเอียดและกราฟ</div>
+             </div>
+             <div class="table-wrap country-table-wrap">
+               <table id="countryRankTable"></table>
+             </div>
+           </section>
+           <section class="country-section">
+             <div class="country-section-head">
+               <h3>12 เดือนล่าสุดของประเทศที่เลือก</h3>
+               <div class="hint">ตัวเลขรายเดือน พร้อม MoM, YoY และส่วนแบ่งของยอดรวม</div>
+             </div>
+             <div class="table-wrap country-table-wrap">
+               <table id="countryMonthlyTable"></table>
+             </div>
+           </section>
+         </article>
+
+         <article class="panel">
           <div class="panel-head">
             <div>
               <h2 id="growthTitle">การเติบโต</h2>
@@ -729,6 +853,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     const CONTINENT_OPTIONS = DATA.continent_options || [...new Set(COUNTRY_MONTHLY.map(row => row.continent))].sort();
     const DEFAULT_CONTINENT = CONTINENT_OPTIONS.includes("Asia and the Pacific") ? "Asia and the Pacific" : (CONTINENT_OPTIONS[0] || "");
     const DEFAULT_COUNTRY = COUNTRY_OPTIONS.includes("China") ? "China" : (COUNTRY_OPTIONS[0] || "");
+    const COUNTRY_BY_KEY = new Map(COUNTRY_MONTHLY.map(row => [`${row.country}|${row.date}`, row]));
     const segmentCache = { key: "", model: null };
 
     const state = {
@@ -814,6 +939,74 @@ HTML_TEMPLATE = r"""<!doctype html>
         return COUNTRY_MONTHLY.filter(row => row.continent === state.selectedContinent);
       }
       return [];
+    }
+
+    function finiteNumber(value) {
+      if (value === null || value === undefined || value === "") return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function countryKey(country, date) {
+      return `${country}|${date}`;
+    }
+
+    function priorCountryDate(row) {
+      const year = Number(row.year);
+      const month = Number(row.month);
+      const priorYear = month === 1 ? year - 1 : year;
+      const priorMonth = month === 1 ? 12 : month - 1;
+      return `${priorYear}-${String(priorMonth).padStart(2, "0")}-01`;
+    }
+
+    function countryRowYoY(row) {
+      if (!row) return null;
+      const sourceBase = finiteNumber(row.source_yoy_base_arrivals);
+      const historical = COUNTRY_BY_KEY.get(countryKey(row.country, `${Number(row.year) - 1}-${String(Number(row.month)).padStart(2, "0")}-01`));
+      return pctChange(Number(row.arrivals), sourceBase ?? finiteNumber(historical?.arrivals));
+    }
+
+    function countryRowMoM(row) {
+      if (!row) return null;
+      const previous = COUNTRY_BY_KEY.get(countryKey(row.country, priorCountryDate(row)));
+      return pctChange(Number(row.arrivals), finiteNumber(previous?.arrivals));
+    }
+
+    function countrySnapshot() {
+      const rows = COUNTRY_MONTHLY
+        .filter(row => row.country === state.selectedCountry)
+        .slice()
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      if (!rows.length) return null;
+      const latest = rows[rows.length - 1];
+      const currentYearRows = rows.filter(row => Number(row.year) === Number(latest.year) && Number(row.month) <= Number(latest.month));
+      const ytdArrivals = currentYearRows.reduce((sum, row) => sum + Number(row.arrivals || 0), 0);
+      const ytdBases = currentYearRows.map(row => {
+        const sourceBase = finiteNumber(row.source_yoy_base_arrivals);
+        if (sourceBase !== null) return sourceBase;
+        const historical = COUNTRY_BY_KEY.get(countryKey(row.country, `${Number(row.year) - 1}-${String(Number(row.month)).padStart(2, "0")}-01`));
+        return finiteNumber(historical?.arrivals);
+      });
+      const ytdBaseArrivals = ytdBases.every(value => value !== null)
+        ? ytdBases.reduce((sum, value) => sum + Number(value), 0)
+        : null;
+      const ranking = COUNTRY_MONTHLY
+        .filter(row => row.date === latest.date && Number(row.arrivals || 0) > 0)
+        .slice()
+        .sort((a, b) => Number(b.arrivals) - Number(a.arrivals));
+      const rank = ranking.findIndex(row => row.country === latest.country) + 1;
+      const totalRow = DATA.monthly.find(row => row.date === latest.date);
+      const totalArrivals = finiteNumber(totalRow?.arrivals);
+      const sharePct = totalArrivals ? (Number(latest.arrivals) / totalArrivals) * 100 : null;
+      return {
+        rows,
+        latest,
+        ytdArrivals,
+        ytdBaseArrivals,
+        ranking,
+        rank: rank || null,
+        sharePct
+      };
     }
 
     function aggregateMonthlyRows(rows) {
@@ -1081,6 +1274,15 @@ HTML_TEMPLATE = r"""<!doctype html>
         state.selectedYears = new Set(defaultYears());
         render();
       });
+      document.getElementById("countryDetailPanel").addEventListener("click", event => {
+        const countryButton = event.target.closest("[data-country-select]");
+        if (!countryButton) return;
+        state.segmentType = "country";
+        state.selectedCountry = countryButton.dataset.countrySelect;
+        resetSelection();
+        state.selectedYears = new Set(defaultYears());
+        render();
+      });
       document.getElementById("labelToggle").addEventListener("change", event => {
         state.labels = event.target.checked;
         state.selectedPoint = null;
@@ -1227,6 +1429,92 @@ HTML_TEMPLATE = r"""<!doctype html>
         </article>
       `).join("");
       document.getElementById("freshnessPill").textContent = `ข้อมูลล่าสุด: ${dateText(latestMonth.date)} | ${selectedSegmentLabel()} | build __BUILD_DATE__${latestQualityNote ? ` | ขาดข้อมูล ${latestMonth.missing_reporting_days || 4} วัน` : ""}`;
+    }
+
+    function renderCountryDetail() {
+      const panel = document.getElementById("countryDetailPanel");
+      panel.hidden = state.segmentType !== "country";
+      if (panel.hidden) return;
+
+      const summary = document.getElementById("countrySummary");
+      const rankingTable = document.getElementById("countryRankTable");
+      const monthlyTable = document.getElementById("countryMonthlyTable");
+      const hint = document.getElementById("countryDetailHint");
+      const snapshot = countrySnapshot();
+      if (!snapshot) {
+        hint.textContent = "ไม่พบข้อมูลสำหรับประเทศที่เลือก";
+        summary.innerHTML = '<div class="selected-empty">ไม่มีข้อมูลรายประเทศสำหรับตัวกรองนี้</div>';
+        rankingTable.innerHTML = "";
+        monthlyTable.innerHTML = "";
+        return;
+      }
+
+      const latest = snapshot.latest;
+      const latestYoY = countryRowYoY(latest);
+      const latestMoM = countryRowMoM(latest);
+      const ytdYoY = pctChange(snapshot.ytdArrivals, snapshot.ytdBaseArrivals);
+      const previousMonth = COUNTRY_BY_KEY.get(countryKey(latest.country, priorCountryDate(latest)));
+      hint.textContent = `${latest.country} | ${latest.continent || "ไม่ระบุทวีป"} | ข้อมูลล่าสุด ${dateText(latest.date)}`;
+
+      const metrics = [
+        {
+          label: `เดือนล่าสุด ${dateText(latest.date)}`,
+          value: shortNumber(Number(latest.arrivals)),
+          note: `${number(latest.arrivals)} คน | YoY ${pct(latestYoY)}`,
+          delta: latestYoY
+        },
+        {
+          label: `YTD ม.ค.-${MONTHS_TH[Number(latest.month) - 1]} ${be(latest.year)}`,
+          value: shortNumber(snapshot.ytdArrivals),
+          note: `YoY ${pct(ytdYoY)} | ${number(snapshot.ytdArrivals)} คน`,
+          delta: ytdYoY
+        },
+        {
+          label: "MoM เดือนล่าสุด",
+          value: pct(latestMoM),
+          note: previousMonth ? `เทียบ ${dateText(previousMonth.date)}` : "ไม่มีเดือนก่อนหน้า",
+          delta: latestMoM
+        },
+        {
+          label: "อันดับ / ส่วนแบ่ง",
+          value: snapshot.rank ? `#${snapshot.rank}/${snapshot.ranking.length}` : "n/a",
+          note: snapshot.sharePct === null ? "ไม่มีฐานยอดรวม" : `ส่วนแบ่ง ${pct(snapshot.sharePct)} ของยอดรวม`,
+          delta: null
+        }
+      ];
+      summary.innerHTML = metrics.map(metric => `
+        <div class="country-metric">
+          <div class="country-metric-label">${htmlEscape(metric.label)}</div>
+          <div class="country-metric-value">${htmlEscape(metric.value)}</div>
+          <div class="country-metric-note ${deltaClass(metric.delta)}">${htmlEscape(metric.note)}</div>
+        </div>
+      `).join("");
+
+      const topRows = snapshot.ranking.slice(0, 10);
+      rankingTable.innerHTML = `<thead><tr><th>#</th><th>ประเทศ</th><th>จำนวน</th><th>YoY</th></tr></thead><tbody>
+        ${topRows.map((row, index) => `<tr class="${row.country === latest.country ? "country-rank-current" : ""}">
+          <td>${index + 1}</td>
+          <td><button type="button" class="country-rank-button" data-country-select="${attrEscape(row.country)}">${htmlEscape(row.country)}</button></td>
+          <td>${number(row.arrivals)}</td>
+          <td class="${deltaClass(countryRowYoY(row))}">${pct(countryRowYoY(row))}</td>
+        </tr>`).join("")}
+      </tbody>`;
+
+      const recentRows = snapshot.rows.slice(-12).reverse();
+      monthlyTable.innerHTML = `<thead><tr><th>ช่วงเวลา</th><th>จำนวน</th><th>MoM</th><th>YoY</th><th>ส่วนแบ่ง</th></tr></thead><tbody>
+        ${recentRows.map(row => {
+          const totalRow = DATA.monthly.find(item => item.date === row.date);
+          const totalArrivals = finiteNumber(totalRow?.arrivals);
+          const share = totalArrivals ? (Number(row.arrivals) / totalArrivals) * 100 : null;
+          return `<tr>
+            <td>${dateText(row.date)}</td>
+            <td>${number(row.arrivals)}</td>
+            <td class="${deltaClass(countryRowMoM(row))}">${pct(countryRowMoM(row))}</td>
+            <td class="${deltaClass(countryRowYoY(row))}">${pct(countryRowYoY(row))}</td>
+            <td>${pct(share)}</td>
+          </tr>`;
+        }).join("")}
+      </tbody>`;
     }
 
     function xDomainForGrain() {
@@ -1669,6 +1957,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       renderGrowthButtons();
       renderYearStrip();
       renderKpis();
+      renderCountryDetail();
       renderCharts();
       renderDetailTable();
       renderValidation();

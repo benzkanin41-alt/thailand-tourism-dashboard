@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import gzip
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from work.fetch_tourism_data import NewsFile, add_required_source_fallbacks, select_best_monthly_rows
+import requests
+
+from work.fetch_tourism_data import (
+    NewsFile,
+    add_required_receipt_validation_sources,
+    add_required_source_fallbacks,
+    select_best_monthly_rows,
+    try_download_text_with_snapshot_fallback,
+)
 
 
 def make_source(year: int, category_id: int, article_id: int, published: str) -> NewsFile:
@@ -92,6 +104,80 @@ class RequiredSourceFallbackTests(unittest.TestCase):
         sources = add_required_source_fallbacks([existing])
 
         self.assertEqual(1, sum(source.article_id == 1891 for source in sources))
+
+    def test_adds_missing_official_2023_receipt_workbook(self) -> None:
+        sources = add_required_receipt_validation_sources(2023, [])
+
+        self.assertEqual([12700], [source.article_id for source in sources])
+        self.assertEqual(
+            "TOURISM RECEIPTS FROM INTERNATIONAL TOURIST ARRIVALS 2023",
+            sources[0].title,
+        )
+        self.assertTrue(sources[0].file_url.startswith("https://www.mots.go.th/"))
+        self.assertTrue(sources[0].file_url.endswith(".xlsx"))
+
+    def test_does_not_duplicate_existing_2023_receipt_workbook(self) -> None:
+        existing = NewsFile(
+            year=2023,
+            category_id=797,
+            article_id=12700,
+            article_nid=0,
+            title="TOURISM RECEIPTS FROM INTERNATIONAL TOURIST ARRIVALS 2023",
+            published="2025-01-23T00:00:00+07:00",
+            link_download="https://www.mots.go.th/receipt.xlsx",
+            page_url="https://www.mots.go.th/news/category/797",
+            file_url="https://www.mots.go.th/receipt.xlsx",
+        )
+
+        sources = add_required_receipt_validation_sources(2023, [existing])
+
+        self.assertEqual([existing], sources)
+
+
+class DownloadSnapshotFallbackTests(unittest.TestCase):
+    def test_refresh_uses_verified_snapshot_when_official_url_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "download.csv"
+            snapshot = Path(tmp) / "historical.csv"
+            expected = "date,Number\n1/1/2023,100\n" + ("#" * 1000)
+            snapshot.write_bytes(expected.encode("utf-8"))
+
+            with patch(
+                "work.fetch_tourism_data.requests.get",
+                side_effect=requests.HTTPError("404 Not Found"),
+            ):
+                path, text, content = try_download_text_with_snapshot_fallback(
+                    "https://data.go.th/unavailable.csv",
+                    destination,
+                    snapshot,
+                    refresh=True,
+                )
+
+            self.assertEqual(snapshot, path)
+            self.assertEqual(expected, text)
+            self.assertEqual(expected.encode("utf-8"), content)
+
+    def test_refresh_reads_gzip_snapshot_when_official_url_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "download.csv"
+            snapshot = Path(tmp) / "historical.csv.gz"
+            expected = b"date,Number\n1/1/2023,100\n"
+            snapshot.write_bytes(gzip.compress(expected, mtime=0))
+
+            with patch(
+                "work.fetch_tourism_data.requests.get",
+                side_effect=requests.HTTPError("404 Not Found"),
+            ):
+                path, text, content = try_download_text_with_snapshot_fallback(
+                    "https://data.go.th/unavailable.csv",
+                    destination,
+                    snapshot,
+                    refresh=True,
+                )
+
+            self.assertEqual(snapshot, path)
+            self.assertEqual(expected.decode("utf-8"), text)
+            self.assertEqual(expected, content)
 
 
 if __name__ == "__main__":

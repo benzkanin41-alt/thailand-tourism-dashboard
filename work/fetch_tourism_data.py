@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 import math
@@ -24,6 +25,7 @@ WORK = ROOT / "work"
 CACHE = WORK / "cache"
 PAGES = CACHE / "pages"
 FILES = CACHE / "source_files"
+SOURCE_SNAPSHOTS = WORK / "source_snapshots"
 OUT = WORK / "data"
 
 MOTS_BASE = "https://www.mots.go.th"
@@ -43,6 +45,19 @@ RECEIPT_VALIDATION_CATEGORIES = {
     2022: 761,
     2023: 797,
     2024: 810,
+}
+REQUIRED_RECEIPT_VALIDATION_SOURCES = {
+    2023: {
+        "category_id": 797,
+        "article_id": 12700,
+        "title": "TOURISM RECEIPTS FROM INTERNATIONAL TOURIST ARRIVALS 2023",
+        "published": "2025-01-23T00:00:00+07:00",
+        "file_url": (
+            "https://www.mots.go.th/images/images/v2022_1737615940019"
+            "VE9VUklTTSBSRUNFSVBUUyBGUk9NIElOVEVSTkFUSU9OQUwgVE9VUklTVCBB"
+            "UlJJVkFMUyAyMDIzIChXZWIpLnhsc3g=.xlsx"
+        ),
+    }
 }
 WORLD_BANK_API = (
     "https://api.worldbank.org/v2/country/THA/indicator/ST.INT.ARVL"
@@ -149,7 +164,7 @@ class NewsFile:
 
 
 def ensure_dirs() -> None:
-    for path in [PAGES, FILES, OUT]:
+    for path in [PAGES, FILES, SOURCE_SNAPSHOTS, OUT]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -313,6 +328,23 @@ def try_download_text(url: str, destination: Path, refresh: bool = False) -> tup
         raise ValueError(f"download too small: {len(content)} bytes")
     destination.write_bytes(content)
     return destination, content.decode("utf-8-sig", errors="replace"), content
+
+
+def try_download_text_with_snapshot_fallback(
+    url: str, destination: Path, snapshot: Path, refresh: bool = False
+) -> tuple[Path, str, bytes]:
+    try:
+        return try_download_text(url, destination, refresh=refresh)
+    except (requests.RequestException, ValueError):
+        if not snapshot.exists() or snapshot.stat().st_size == 0:
+            raise
+        snapshot_bytes = snapshot.read_bytes()
+        content = (
+            gzip.decompress(snapshot_bytes)
+            if snapshot.suffix.lower() == ".gz"
+            else snapshot_bytes
+        )
+        return snapshot, content.decode("utf-8-sig", errors="replace"), content
 
 
 def value_to_text(value: Any) -> str:
@@ -1180,7 +1212,10 @@ def build_country_validation(
 
 def load_trend_inbound_monthlies(refresh: bool = False) -> tuple[list[dict[str, Any]], NewsFile]:
     local = FILES / "data_go_trend_inbound_tourists_2015_2023.csv"
-    local, text, content = try_download_text(TREND_INBOUND_CSV_URL, local, refresh=refresh)
+    snapshot = SOURCE_SNAPSHOTS / "data_go_trend_inbound_tourists_2015_2023.csv.gz"
+    local, text, content = try_download_text_with_snapshot_fallback(
+        TREND_INBOUND_CSV_URL, local, snapshot, refresh=refresh
+    )
     rows_by_month: dict[tuple[int, int], int] = {}
     reader = csv.DictReader(text.splitlines())
     number_col = next((name for name in reader.fieldnames or [] if "Number" in name), None)
@@ -1246,7 +1281,10 @@ def load_trend_inbound_monthlies(refresh: bool = False) -> tuple[list[dict[str, 
 
 def load_trend_inbound_country_monthlies(refresh: bool = False) -> list[dict[str, Any]]:
     local = FILES / "data_go_trend_inbound_tourists_2015_2023.csv"
-    local, text, content = try_download_text(TREND_INBOUND_CSV_URL, local, refresh=refresh)
+    snapshot = SOURCE_SNAPSHOTS / "data_go_trend_inbound_tourists_2015_2023.csv.gz"
+    local, text, content = try_download_text_with_snapshot_fallback(
+        TREND_INBOUND_CSV_URL, local, snapshot, refresh=refresh
+    )
     reader = csv.DictReader(text.splitlines())
     number_col = next((name for name in reader.fieldnames or [] if "Number" in name), None)
     if number_col is None:
@@ -1350,6 +1388,32 @@ def is_receipt_summary_source(source: NewsFile) -> bool:
     return "TOURISM RECEIPTS FROM INTERNATIONAL TOURIST ARRIVALS" in searchable
 
 
+def add_required_receipt_validation_sources(
+    year: int, sources: list[NewsFile]
+) -> list[NewsFile]:
+    required = REQUIRED_RECEIPT_VALIDATION_SOURCES.get(year)
+    if required is None or any(
+        source.article_id == required["article_id"] for source in sources
+    ):
+        return sources
+    file_url = str(required["file_url"])
+    category_id = int(required["category_id"])
+    return [
+        *sources,
+        NewsFile(
+            year=year,
+            category_id=category_id,
+            article_id=int(required["article_id"]),
+            article_nid=0,
+            title=str(required["title"]),
+            published=str(required["published"]),
+            link_download=file_url,
+            page_url=f"{MOTS_BASE}/news/category/{category_id}",
+            file_url=file_url,
+        ),
+    ]
+
+
 def load_receipt_annual_validations(refresh: bool = False) -> tuple[dict[int, dict[str, Any]], list[NewsFile]]:
     validations: dict[int, dict[str, Any]] = {}
     parsed_sources: list[NewsFile] = []
@@ -1357,6 +1421,7 @@ def load_receipt_annual_validations(refresh: bool = False) -> tuple[dict[int, di
         page_url = f"{MOTS_BASE}/news/category/{category_id}"
         html = fetch_text(page_url, refresh=refresh)
         sources = [source for source in parse_news_files(html, category_id, year, page_url) if is_receipt_summary_source(source)]
+        sources = add_required_receipt_validation_sources(year, sources)
         candidate_validations: list[dict[str, Any]] = []
         sources = sorted(sources, key=lambda source: parse_datetime(source.published), reverse=True)
         for source in sources:

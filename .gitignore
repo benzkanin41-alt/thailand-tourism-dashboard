@@ -2,6 +2,7 @@ work/cache/
 work/data/
 work/__pycache__/
 work/edge-cdp-profile-click-test/
+work/browser-qa/
 work/*.png
 work/*_smoke.js
 work/*.log

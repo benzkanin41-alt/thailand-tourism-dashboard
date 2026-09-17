@@ -27,6 +27,19 @@ class CountryDetailTemplateTests(unittest.TestCase):
         ]:
             self.assertIn(marker, template)
 
+    def test_chart_labels_declutter_without_removing_clickable_points(self) -> None:
+        template = build_dashboard.HTML_TEMPLATE
+        for marker in [
+            "function layoutPointLabels(svg, bounds)",
+            'label.setAttribute("visibility", "hidden")',
+            'data-point-y="${y}"',
+            'layoutPointLabels(target.querySelector("svg")',
+            'data-point-id="${attrEscape(pointId)}"',
+            'node.addEventListener("click", () => selectPoint(node))',
+            "word-break: normal; overflow-wrap: break-word;",
+        ]:
+            self.assertIn(marker, template)
+
 
 if __name__ == "__main__":
     unittest.main()

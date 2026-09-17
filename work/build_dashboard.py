@@ -96,6 +96,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       overflow-wrap: anywhere;
     }
 
+    h1 .title-word { white-space: nowrap; }
+
     .subtitle {
       margin: 8px 0 0;
       max-width: 900px;
@@ -671,7 +673,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     @media (max-width: 720px) {
       .shell { width: 100%; max-width: 100vw; padding: 16px; overflow: hidden; }
-      h1 { word-break: break-all; }
+      h1 { font-size: 26px; line-height: 1.25; word-break: normal; overflow-wrap: break-word; }
       h1 span { display: block; }
       .subtitle { word-break: break-word; }
       .subtitle span { display: block; }
@@ -693,7 +695,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <div class="shell">
     <header class="topbar">
       <div>
-        <h1><span>Dashboard จำนวนนักท่องเที่ยว</span> <span>ต่างชาติของประเทศไทย</span></h1>
+        <h1><span>Dashboard <span class="title-word">จำนวนนักท่องเที่ยว</span></span> <span>ต่างชาติของประเทศไทย</span></h1>
         <p class="subtitle"><span>ข้อมูลรายเดือน/YTD/ไตรมาส/ปี ตั้งแต่ 2555 ถึงล่าสุด</span> <span>จากแหล่งภาครัฐ พร้อมการตรวจซ้ำหลายแหล่ง</span></p>
       </div>
       <div class="source-pill" id="freshnessPill">กำลังโหลดข้อมูล</div>
@@ -1644,6 +1646,41 @@ HTML_TEMPLATE = r"""<!doctype html>
       return `<b>ปี ${be(row.year)} (${row.year})</b><br>${htmlEscape(row.segment_label || selectedSegmentLabel())}<br>${label}: ${main}<br><span class="muted">สถานะ: ${suffix}<br>YoY: ${pct(row.yoy_pct)} ${yoyBasis ? "(" + yoyBasis + ")" : ""}</span>`;
     }
 
+    function layoutPointLabels(svg, bounds) {
+      const placed = [];
+      const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      const pointBoxes = [...svg.querySelectorAll(".point")].map(point => {
+        const x = Number(point.getAttribute("cx"));
+        const y = Number(point.getAttribute("cy"));
+        const radius = Number(point.getAttribute("r")) + 2;
+        return { left: x - radius, right: x + radius, top: y - radius, bottom: y + radius };
+      });
+      // Keep recent years and endpoints readable; crowded points retain their click details.
+      const labels = [...svg.querySelectorAll(".point-label")].reverse()
+        .sort((a, b) => Number(b.dataset.endpoint) - Number(a.dataset.endpoint));
+      labels.forEach(label => {
+        const x = Number(label.getAttribute("x"));
+        const y = Number(label.dataset.pointY);
+        const preferred = Number(label.dataset.labelOffset);
+        const offsets = [preferred, preferred < 0 ? 16 : -9, preferred < 0 ? -22 : 29];
+        label.setAttribute("visibility", "hidden");
+        for (const offset of offsets) {
+          label.setAttribute("x", x);
+          label.setAttribute("y", y + offset);
+          let box = label.getBBox();
+          const shift = Math.max(0, bounds.left + 2 - box.x) - Math.max(0, box.x + box.width + 2 - bounds.right);
+          label.setAttribute("x", x + shift);
+          box = label.getBBox();
+          const rect = { left: box.x - 2, right: box.x + box.width + 2, top: box.y - 2, bottom: box.y + box.height + 2 };
+          if (rect.left < bounds.left || rect.right > bounds.right || rect.top < bounds.top || rect.bottom > bounds.bottom) continue;
+          if (placed.some(other => overlaps(rect, other)) || pointBoxes.some(point => overlaps(rect, point))) continue;
+          label.setAttribute("visibility", "visible");
+          placed.push(rect);
+          break;
+        }
+      });
+    }
+
     function renderLineChart(targetId, legendId, series, options) {
       const target = document.getElementById(targetId);
       const legend = document.getElementById(legendId);
@@ -1721,12 +1758,13 @@ HTML_TEMPLATE = r"""<!doctype html>
           svg += `<circle class="point${selectedClass}" cx="${x}" cy="${y}" r="4.8" fill="${item.color}" data-tip="${attrEscape(point.tip)}" data-point-id="${attrEscape(pointId)}" tabindex="0" role="button" aria-label="${attrEscape(`${metricLabel} ${periodName(point.row)} ${metricDisplay}`)}"></circle>`;
           if (labelAll || (labelEndpoints && idx === points.length - 1)) {
             const yOffset = options.zeroBase ? -9 : (point.y >= 0 ? -9 : 16);
-            svg += `<text class="point-label" x="${x}" y="${y + yOffset}" text-anchor="middle">${htmlEscape(point.label)}</text>`;
+            svg += `<text class="point-label" x="${x}" y="${y + yOffset}" data-point-y="${y}" data-label-offset="${yOffset}" data-endpoint="${idx === points.length - 1 ? 1 : 0}" text-anchor="middle">${htmlEscape(point.label)}</text>`;
           }
         });
       });
       svg += `</svg>`;
       target.innerHTML = svg;
+      layoutPointLabels(target.querySelector("svg"), { left: M.left, right: W - M.right, top: M.top, bottom: H - M.bottom });
 
       const concise = series.length > 18 ? series.filter((_, idx) => idx % Math.ceil(series.length / 18) === 0) : series;
       legend.innerHTML = concise.map(item => `<span class="legend-item"><span class="legend-swatch" style="--swatch:${item.color}; ${item.dash ? "border-top:3px dashed " + item.color + "; background:transparent;" : ""}"></span>${htmlEscape(item.key)}</span>`).join("");

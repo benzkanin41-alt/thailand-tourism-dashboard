@@ -13,6 +13,7 @@ from work.fetch_tourism_data import (
     add_required_receipt_validation_sources,
     add_required_source_fallbacks,
     select_best_monthly_rows,
+    load_world_bank,
     try_download_text_with_snapshot_fallback,
 )
 
@@ -84,6 +85,35 @@ class SelectBestMonthlyRowsTests(unittest.TestCase):
         self.assertEqual(100, by_period[(2025, 6)]["source_article_id"])
         self.assertEqual(200, by_period[(2026, 6)]["source_article_id"])
         self.assertEqual(800, by_period[(2026, 6)]["source_yoy_base_arrivals"])
+
+
+class WorldBankFallbackTests(unittest.TestCase):
+    def test_fresh_annual_response_takes_precedence_over_snapshot(self) -> None:
+        response = [{"lastupdated": "2026-10-01"}, [{"date": "2019", "value": 123}]]
+        metadata: dict[str, object] = {}
+        with patch("work.fetch_tourism_data.fetch_json", return_value=response):
+            values = load_world_bank(refresh=True, metadata=metadata)
+        self.assertEqual({2019: 123}, values)
+        self.assertEqual("live", metadata["world_bank_validation"]["mode"])
+
+    def test_api_failure_preserves_verified_historical_annual_checks(self) -> None:
+        metadata: dict[str, object] = {}
+        with patch("work.fetch_tourism_data.fetch_json", side_effect=requests.HTTPError("502")):
+            values = load_world_bank(refresh=True, metadata=metadata)
+        self.assertEqual(22_354_000, values[2012])
+        self.assertEqual(39_916_000, values[2019])
+        self.assertNotIn(2026, values)
+        self.assertEqual("verified_snapshot", metadata["world_bank_validation"]["mode"])
+
+    def test_corrupt_snapshot_is_not_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "world_bank.json.gz"
+            snapshot.write_bytes(gzip.compress(b"[]", mtime=0))
+            with patch("work.fetch_tourism_data.fetch_json", side_effect=requests.Timeout), patch(
+                "work.fetch_tourism_data.WORLD_BANK_SNAPSHOT", snapshot
+            ):
+                with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                    load_world_bank(refresh=True)
 
 
 class RequiredSourceFallbackTests(unittest.TestCase):

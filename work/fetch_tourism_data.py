@@ -63,6 +63,8 @@ WORLD_BANK_API = (
     "https://api.worldbank.org/v2/country/THA/indicator/ST.INT.ARVL"
     "?format=json&per_page=80"
 )
+WORLD_BANK_SNAPSHOT = SOURCE_SNAPSHOTS / "world_bank_thailand_arrivals.json.gz"
+WORLD_BANK_SNAPSHOT_SHA256 = "dc0da83006d9507f84358ea56d3b5a15f20da7f7e5979028b106d80b8db8fd6e"
 REQUEST_HEADERS = {
     "User-Agent": "thailand-tourism-dashboard/1.0 (+https://github.com/benzkanin41-alt/thailand-tourism-dashboard)"
 }
@@ -1461,8 +1463,28 @@ def load_receipt_annual_validations(refresh: bool = False) -> tuple[dict[int, di
     return validations, parsed_sources
 
 
-def load_world_bank(refresh: bool = False) -> dict[int, int]:
-    data = fetch_json(WORLD_BANK_API, refresh=refresh)
+def load_world_bank(refresh: bool = False, metadata: dict[str, Any] | None = None) -> dict[int, int]:
+    mode = "cached" if not refresh and (PAGES / cache_name(WORLD_BANK_API)).exists() else "live"
+    warning = None
+    try:
+        data = fetch_json(WORLD_BANK_API, refresh=refresh)
+    except requests.RequestException as exc:
+        if not WORLD_BANK_SNAPSHOT.exists():
+            raise
+        content = gzip.decompress(WORLD_BANK_SNAPSHOT.read_bytes())
+        if hashlib.sha256(content).hexdigest() != WORLD_BANK_SNAPSHOT_SHA256:
+            raise ValueError("World Bank historical snapshot checksum mismatch") from exc
+        data = json.loads(content)
+        mode = "verified_snapshot"
+        warning = f"World Bank API unavailable ({type(exc).__name__}); historical annual checks use the verified snapshot"
+        print(f"WARN {warning}", flush=True)
+    if metadata is not None:
+        metadata["world_bank_validation"] = {
+            "mode": mode,
+            "source_last_updated": data[0].get("lastupdated") if isinstance(data, list) and data else None,
+            "snapshot_sha256": WORLD_BANK_SNAPSHOT_SHA256 if mode == "verified_snapshot" else None,
+            "warning": warning,
+        }
     values: dict[int, int] = {}
     if isinstance(data, list) and len(data) > 1:
         for item in data[1]:
@@ -1748,7 +1770,7 @@ def main(argv: list[str] | None = None) -> int:
     workbook_country_rows = download_and_parse_selected_country_rows(source_files, selected_article_ids, refresh=args.refresh)
     country_rows = select_country_rows_for_monthlies(workbook_country_rows + trend_country_rows, monthly_rows)
     parsed_files.extend([trend_source, *annual_sources, *receipt_sources])
-    wb_values = load_world_bank(refresh=args.refresh)
+    wb_values = load_world_bank(refresh=args.refresh, metadata=metadata)
     derived = build_derived(
         monthly_rows,
         wb_values,

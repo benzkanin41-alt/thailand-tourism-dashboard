@@ -1984,6 +1984,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         ${latest.data_quality_note ? `<li><strong>หมายเหตุคุณภาพข้อมูลล่าสุด:</strong> ${htmlEscape(latest.data_quality_note)}; ค่า YoY ใช้ฐานเปรียบเทียบช่วงวันเท่ากันจากไฟล์ MOTS</li>` : ""}
         <li>ตัวกรองรายประเทศ/รายทวีปใช้ country-level CSV จาก data.go.th/MOTS ร่วมกับ workbook รายเดือนล่าสุดของ MOTS ครอบคลุม ${countryYears.length ? be(countryYears[0]) + "-" + be(countryYears[countryYears.length - 1]) : "n/a"}; ไฟล์ประเทศปี 2556-2557 ที่ตรวจพบถูกกันออกจาก filter เพราะยอดประเทศรวมแล้วไม่ตรงกับ Grand Total</li>
         <li><a href="${htmlEscape(meta.world_bank_api)}">World Bank ST.INT.ARVL API</a> ใช้ตรวจยอดรายปี 2555-2562 โดยต่างกันเพียงระดับ rounding ของ annual arrivals</li>
+        ${meta.world_bank_validation?.mode === "verified_snapshot" ? `<li>การตรวจยอดรายปีเก่าใช้ข้อมูลสำรอง World Bank ที่ตรวจสอบแล้ว (ต้นทางอัปเดต ${htmlEscape(meta.world_bank_validation.source_last_updated || "")}) เนื่องจาก API ตอบกลับผิดพลาดในรอบนี้; ข้อมูลรายเดือนล่าสุดมาจากไฟล์ MOTS</li>` : ""}
       `;
     }
 

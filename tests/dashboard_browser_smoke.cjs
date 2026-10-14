@@ -122,16 +122,24 @@ async function audit(page, name) {
         if (grain === "ytd") {
           assert.deepEqual(await page.locator("#growthButtons button").allTextContents(), ["YoY"]);
         }
-        await page.locator("#arrivalsChart .point").last().click({ force: true });
+        const arrivalPoint = page.locator("#arrivalsChart .point").last();
+        const arrivalId = await arrivalPoint.getAttribute("data-point-id");
+        await arrivalPoint.click();
         assert.equal(await page.locator(".point.selected").count(), 1);
+        assert.equal(await page.locator(".point.selected").getAttribute("data-point-id"), arrivalId,
+          grain + " arrivals selection at " + width);
         assert.ok((await page.locator("#selectedPointPanel").innerText()).length > 30);
         const selectedDetails = await page.evaluate(() => ({
           text: document.getElementById("selectedPointPanel").innerText,
           expected: state.selectedPoint.metricDisplay
         }));
         assert.ok(selectedDetails.text.includes(selectedDetails.expected));
-        await page.locator("#growthChart .point").last().click({ force: true });
+        const growthPoint = page.locator("#growthChart .point").last();
+        const growthId = await growthPoint.getAttribute("data-point-id");
+        await growthPoint.click();
         assert.equal(await page.locator("#growthChart .point.selected").count(), 1);
+        assert.equal(await page.locator(".point.selected").getAttribute("data-point-id"), growthId,
+          grain + " growth selection at " + width);
         await audit(page, "China-click-details-" + grain + "-" + width);
         if (grain === "monthly" || grain === "quarterly") {
           const growthModes = await page.locator("#growthButtons button").allTextContents();

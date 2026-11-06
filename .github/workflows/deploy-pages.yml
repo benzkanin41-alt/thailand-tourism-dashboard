@@ -8,6 +8,12 @@ on:
     # Runs every 15th day of the month at 09:17 Asia/Bangkok (02:17 UTC).
     - cron: "17 2 15 * *"
   workflow_dispatch:
+    inputs:
+      through_month:
+        description: "Optional last reporting month, YYYY-MM (AD); blank uses latest"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -36,7 +42,21 @@ jobs:
           pip install -r requirements.txt
 
       - name: Fetch official tourism data
-        run: python work/fetch_tourism_data.py --refresh
+        env:
+          THROUGH_MONTH: ${{ inputs.through_month }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            THROUGH_MONTH="$(python -c 'import json; from pathlib import Path; p = Path("outputs/source_metadata.json"); print(json.loads(p.read_text(encoding="utf-8")).get("reporting_through_month", "") if p.exists() else "")')"
+          fi
+          args=(--refresh)
+          if [ -n "$THROUGH_MONTH" ]; then
+            args+=(--through-month "$THROUGH_MONTH")
+          fi
+          python work/fetch_tourism_data.py "${args[@]}"
+
+      - name: Test source selection and reporting periods
+        run: python -m unittest discover -s tests -v
 
       - name: Build static dashboard
         run: python work/build_dashboard.py

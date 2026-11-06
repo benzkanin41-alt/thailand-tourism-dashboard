@@ -1116,11 +1116,14 @@ def select_best_monthly_rows(
 def select_country_rows_for_monthlies(
     country_rows: list[dict[str, Any]], monthly_rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    source_by_year = {int(row["year"]): int(row["source_article_id"]) for row in monthly_rows}
+    source_by_period = {
+        (int(row["year"]), int(row["month"])): int(row["source_article_id"])
+        for row in monthly_rows
+    }
     selected = [
         row
         for row in country_rows
-        if int(row["source_article_id"]) == source_by_year.get(int(row["year"]))
+        if int(row["source_article_id"]) == source_by_period.get((int(row["year"]), int(row["month"])))
     ]
     return sorted(selected, key=lambda row: (row["year"], row["month"], row["country"]))
 
@@ -1748,9 +1751,29 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def parse_reporting_month(value: str) -> tuple[int, int]:
+    if not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", value):
+        raise argparse.ArgumentTypeError("Use YYYY-MM with an AD year, for example 2026-09")
+    year, month = map(int, value.split("-"))
+    if year < 2013:
+        raise argparse.ArgumentTypeError("Monthly reporting starts in 2013")
+    return year, month
+
+
+def limit_reporting_months(
+    rows: list[dict[str, Any]], through_month: tuple[int, int] | None
+) -> list[dict[str, Any]]:
+    if through_month is None:
+        return rows
+    if not any((int(row["year"]), int(row["month"])) == through_month for row in rows):
+        raise ValueError(f"Requested reporting month is unavailable: {through_month[0]:04d}-{through_month[1]:02d}")
+    return [row for row in rows if (int(row["year"]), int(row["month"])) <= through_month]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--through-month", type=parse_reporting_month, help="Optional last reporting month, YYYY-MM (AD)")
     args = parser.parse_args(argv)
 
     ensure_dirs()
@@ -1762,6 +1785,11 @@ def main(argv: list[str] | None = None) -> int:
     annual_extras, annual_sources = load_annual_extras(refresh=args.refresh)
     receipt_validations, receipt_sources = load_receipt_annual_validations(refresh=args.refresh)
     monthly_rows = select_best_monthly_rows(monthly_rows + trend_rows, source_files)
+    if args.through_month is not None:
+        metadata["latest_available_month"] = max(row["date"][:7] for row in monthly_rows)
+        metadata["reporting_through_month"] = f"{args.through_month[0]:04d}-{args.through_month[1]:02d}"
+        monthly_rows = limit_reporting_months(monthly_rows, args.through_month)
+        annual_extras = [row for row in annual_extras if int(row["year"]) < args.through_month[0]]
     selected_article_ids = {
         int(row["source_article_id"])
         for row in monthly_rows

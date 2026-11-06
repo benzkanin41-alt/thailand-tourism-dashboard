@@ -23,3 +23,9 @@ The GitHub Actions workflow in `.github/workflows/deploy-pages.yml` refreshes th
 python -X utf8 .\work\fetch_tourism_data.py --refresh
 python -X utf8 .\work\build_dashboard.py
 ```
+
+For a requested historical reporting endpoint, add `--through-month 2026-09`
+to the fetch command, or set the manual workflow's `through_month` input.
+This retains the latest official revisions through that month. Push deployments
+reuse the reviewed cutoff recorded in `outputs/source_metadata.json`. Scheduled
+runs leave the input empty and continue to fetch the latest available month.

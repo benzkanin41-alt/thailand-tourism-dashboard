@@ -30,6 +30,7 @@ def main() -> int:
         "tourism_country_monthly.csv",
         "validation_annual_worldbank.csv",
         "validation_country_monthly.csv",
+        "source_metadata.json",
     ]:
         shutil.copy2(ROOT / "work" / "data" / filename, OUT_DIR / filename)
     print(f"Wrote {OUT_HTML}")

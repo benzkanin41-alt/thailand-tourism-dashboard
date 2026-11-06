@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import gzip
 import tempfile
 import unittest
@@ -12,8 +13,12 @@ from work.fetch_tourism_data import (
     NewsFile,
     add_required_receipt_validation_sources,
     add_required_source_fallbacks,
+    build_derived,
     select_best_monthly_rows,
+    select_country_rows_for_monthlies,
     load_world_bank,
+    limit_reporting_months,
+    parse_reporting_month,
     try_download_text_with_snapshot_fallback,
 )
 
@@ -85,6 +90,41 @@ class SelectBestMonthlyRowsTests(unittest.TestCase):
         self.assertEqual(100, by_period[(2025, 6)]["source_article_id"])
         self.assertEqual(200, by_period[(2026, 6)]["source_article_id"])
         self.assertEqual(800, by_period[(2026, 6)]["source_yoy_base_arrivals"])
+
+
+class ReportingCutoffTests(unittest.TestCase):
+    def test_month_argument_requires_valid_ad_month(self) -> None:
+        self.assertEqual((2026, 9), parse_reporting_month("2026-09"))
+        for value in ("2026-00", "2026-13", "2026-9", "2012-12", "2026-09-01", "2026-09; echo unsafe"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                parse_reporting_month(value)
+
+    def test_default_retains_latest_and_cutoff_preserves_history(self) -> None:
+        rows = [make_row(year, month, 100, 1, "2026-11-02") for year, month in ((2025, 12), (2026, 9), (2026, 10))]
+        self.assertIs(rows, limit_reporting_months(rows, None))
+        self.assertEqual(rows[:2], limit_reporting_months(rows, (2026, 9)))
+        self.assertEqual(3, len(rows))
+
+    def test_unavailable_month_fails_instead_of_silently_publishing_old_data(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            limit_reporting_months([make_row(2026, 9, 100, 1, "2026-10-01")], (2026, 10))
+
+    def test_cutoff_recalculates_ytd_quarters_and_partial_year(self) -> None:
+        rows = [make_row(year, month, 100 if year == 2025 else 200, 1, "2026-11-02")
+                for year, count in ((2025, 12), (2026, 10)) for month in range(1, count + 1)]
+        data = build_derived(limit_reporting_months(rows, (2026, 9)), {})
+        self.assertEqual("2026-09-01", data["monthly"][-1]["date"])
+        self.assertEqual(1800, data["ytd"][-1]["arrivals"])
+        self.assertEqual(100, data["ytd"][-1]["yoy_pct"])
+        self.assertEqual(3, data["quarterly"][-1]["quarter"])
+        self.assertEqual(1800, data["annual"][-1]["arrivals"])
+        self.assertEqual(9, data["annual"][-1]["months"])
+
+    def test_country_selection_matches_each_national_period_and_source(self) -> None:
+        national = [make_row(2026, 8, 100, 1, "2026-09-01"), make_row(2026, 9, 200, 2, "2026-11-02")]
+        countries = [{**make_row(2026, month, 100, source, "2026-11-02"), "country": "China"}
+                     for month, source in ((8, 1), (8, 2), (9, 2), (10, 2))]
+        self.assertEqual([countries[0], countries[2]], select_country_rows_for_monthlies(countries, national))
 
 
 class WorldBankFallbackTests(unittest.TestCase):

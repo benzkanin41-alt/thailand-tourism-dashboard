@@ -370,9 +370,7 @@
   },
   "trend_inbound_csv_url": "https://ckan.mots.go.th/dataset/445c66d8-a06a-49d9-adfc-35faca6fc785/resource/faffc63c-9507-451a-80b7-554cc0787368/download/est_2024_04_01.csv",
   "world_bank_api": "https://api.worldbank.org/v2/country/THA/indicator/ST.INT.ARVL?format=json&per_page=80",
-  "crawl_at": "2026-11-06T09:11:06",
-  "latest_available_month": "2026-10",
-  "reporting_through_month": "2026-09",
+  "crawl_at": "2026-11-06T09:14:10",
   "world_bank_validation": {
     "mode": "cached",
     "source_last_updated": "2026-10-08",

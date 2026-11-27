@@ -9,6 +9,7 @@ import math
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -183,11 +184,23 @@ def cache_name(url: str) -> str:
     return f"{stem}_{digest}{suffix}"
 
 
+def get_with_transport_retry(url: str, timeout: int, **kwargs: Any) -> requests.Response:
+    for attempt in range(3):
+        try:
+            return requests.get(url, timeout=(10, timeout), **kwargs)
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 2:
+                raise
+            print(f"WARN temporary connection failure; retry {attempt + 1}/2: {url}", flush=True)
+            time.sleep(attempt + 1)
+    raise AssertionError("Unreachable retry state")
+
+
 def fetch_text(url: str, refresh: bool = False) -> str:
     path = PAGES / cache_name(url)
     if path.exists() and not refresh:
         return path.read_text(encoding="utf-8", errors="replace")
-    response = requests.get(url, timeout=40, headers=REQUEST_HEADERS)
+    response = get_with_transport_retry(url, timeout=40, headers=REQUEST_HEADERS)
     response.raise_for_status()
     text = response.text
     path.write_text(text, encoding="utf-8")
@@ -198,7 +211,7 @@ def fetch_json(url: str, refresh: bool = False) -> Any:
     path = PAGES / cache_name(url)
     if path.exists() and not refresh:
         return json.loads(path.read_text(encoding="utf-8"))
-    response = requests.get(url, timeout=40, headers=REQUEST_HEADERS)
+    response = get_with_transport_retry(url, timeout=40, headers=REQUEST_HEADERS)
     response.raise_for_status()
     data = response.json()
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -307,7 +320,7 @@ def try_download(url: str, destination: Path, refresh: bool = False) -> tuple[Pa
     last_error: Exception | None = None
     for candidate in dict.fromkeys(candidates):
         try:
-            response = requests.get(candidate, timeout=60)
+            response = get_with_transport_retry(candidate, timeout=60)
             response.raise_for_status()
             content = response.content
             if len(content) < 1000:
@@ -323,7 +336,7 @@ def try_download_text(url: str, destination: Path, refresh: bool = False) -> tup
     if destination.exists() and destination.stat().st_size > 0 and not refresh:
         content = destination.read_bytes()
         return destination, content.decode("utf-8-sig", errors="replace"), content
-    response = requests.get(url, timeout=60, headers=REQUEST_HEADERS)
+    response = get_with_transport_retry(url, timeout=60, headers=REQUEST_HEADERS)
     response.raise_for_status()
     content = response.content
     if len(content) < 1000:

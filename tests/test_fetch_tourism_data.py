@@ -14,6 +14,8 @@ from work.fetch_tourism_data import (
     add_required_receipt_validation_sources,
     add_required_source_fallbacks,
     build_derived,
+    fetch_text,
+    get_with_transport_retry,
     select_best_monthly_rows,
     select_country_rows_for_monthlies,
     load_world_bank,
@@ -56,6 +58,41 @@ def make_row(
         "source_published": published,
         "source_yoy_base_arrivals": yoy_base,
     }
+
+
+class TransportRetryTests(unittest.TestCase):
+    def test_transient_timeout_retries_with_bounded_timeout(self) -> None:
+        response = requests.Response()
+        response.status_code = 200
+        with patch("work.fetch_tourism_data.time.sleep"), patch(
+            "work.fetch_tourism_data.requests.get", side_effect=[requests.ConnectTimeout(), response]
+        ) as get:
+            self.assertIs(response, get_with_transport_retry("https://www.mots.go.th/", 40))
+        self.assertEqual(2, get.call_count)
+        get.assert_called_with("https://www.mots.go.th/", timeout=(10, 40))
+
+    def test_repeated_failure_is_not_replaced_with_cached_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "old.html").write_text("old data", encoding="utf-8")
+            with patch("work.fetch_tourism_data.PAGES", path), patch(
+                "work.fetch_tourism_data.cache_name", return_value="old.html"
+            ), patch("work.fetch_tourism_data.time.sleep"), patch(
+                "work.fetch_tourism_data.requests.get", side_effect=requests.ConnectTimeout()
+            ) as get:
+                with self.assertRaises(requests.ConnectTimeout):
+                    fetch_text("https://www.mots.go.th/", refresh=True)
+            self.assertEqual(3, get.call_count)
+            self.assertEqual("old data", (path / "old.html").read_text(encoding="utf-8"))
+
+    def test_http_errors_remain_visible_to_existing_callers(self) -> None:
+        response = requests.Response()
+        response.status_code = 404
+        with patch("work.fetch_tourism_data.requests.get", return_value=response) as get:
+            result = get_with_transport_retry("https://www.mots.go.th/missing", 40)
+        self.assertEqual(1, get.call_count)
+        with self.assertRaises(requests.HTTPError):
+            result.raise_for_status()
 
 
 class SelectBestMonthlyRowsTests(unittest.TestCase):
